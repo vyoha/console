@@ -1385,9 +1385,7 @@ function renderLogin() {
   el("cs-brand").innerHTML = marcaVyoha(30);
   var u = contaVyoha(), pend = u ? credencialPendente(u) : null;
   el("cs-equipe").innerHTML = (pend
-    ? '<div class="note wr" style="margin-bottom:12px"><span>' + ICON.alert + "</span><div><b>Primeiro acesso.</b> Entre com <b>" +
-      esc(u.email) + "</b> e a senha <b class='mono'>" + esc(pend) + "</b>. " +
-      "O console vai pedir que você defina a sua senha antes de continuar.</div></div>"
+    ? '<div class="note wr" style="margin-bottom:12px"><span>' + ICON.alert + "</span><div>Primeiro acesso? Solicite as credenciais à Vyoha por um canal privado.</div></div>"
     : (u ? '<div class="sm mut">Acesso de ' + esc(u.email) + "</div>" : "")) +
     '<button onclick="recuperarAcesso()" style="justify-content:center;color:var(--brand);font-size:12.5px;font-weight:620;margin-top:6px">' +
     "Não consigo entrar</button>";
