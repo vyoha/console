@@ -1403,7 +1403,11 @@ function recuperarAcesso() {
 }
 function gerarAcessoEmergencia() {
   garantirAcesso();
-  var u = contaVyoha() || /* fase 4: o acesso nao nasce aqui. Quem cria e o servidor. */
+  try { fecharModal(); } catch (e) {}
+  toast("A recuperacao de acesso passou a ser feita pelo servidor. Fale com a Vyoha.", "err");
+  return;
+  /* fase 4: daqui para baixo nao roda mais. O acesso nasce no servidor. */
+  var u = contaVyoha();
   var nova = senhaProvisoria();
   protegerSenha(u, nova);
   u.trocar_senha = true; u.acesso = null; u.provisoria = nova;
@@ -4495,207 +4499,296 @@ function pg_acessos() {
 
 
 /* ═══════════════════════════════════════════════════════════════
+   /* ===============================================================
    VYOHA CONSOLE · FASE 4 · A AUTORIDADE PASSA PARA O SERVIDOR
-   Esta camada vem depois de tudo e sobrescreve o que decidia acesso
-   pelo localStorage. O banco local continua existindo, mas como
-   CACHE DE TELA preenchido pelo servidor. Ele nao decide mais nada.
-   ═══════════════════════════════════════════════════════════════ */
-(function () {
-  "use strict";
-  var IDENT = null;
-  window.identidadeDoServidor = function () { return IDENT; };
+   Esta camada fica no fim do mesmo script. Ela reatribui as
+   funcoes que decidiam acesso pelo localStorage. O banco local
+   continua existindo, mas como cache de tela.
+   Quem decide: Supabase Auth + meu_acesso() + as RPCs de rede.
+   Marca o proprio estado em document.body[data-f4].
+   =============================================================== */
+var F4_IDENT = null;
 
-  function rpc(nome, corpo) {
-    var c = supaCfg();
-    return fetch(c.url + "/rest/v1/rpc/" + nome, {
-      method: "POST",
-      headers: { apikey: c.key, Authorization: "Bearer " + (SUPA_TOKEN || c.key), "Content-Type": "application/json" },
-      body: JSON.stringify(corpo || {})
-    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, corpo: j }; }); });
+function f4_marca(m) { try { document.body.setAttribute("data-f4", m); } catch (e) {} }
+function f4_falhou(ctx, e) {
+  try { document.body.setAttribute("data-f4-erro", ctx + ": " + (e && e.message ? e.message : e)); } catch (x) {}
+}
+
+function f4_rpc(nome, corpo) {
+  var c = supaCfg();
+  return fetch(c.url + "/rest/v1/rpc/" + nome, {
+    method: "POST",
+    headers: {
+      apikey: c.key,
+      Authorization: "Bearer " + (SUPA_TOKEN || c.key),
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(corpo || {})
+  }).then(function (r) { return r.json().then(function (j) { return { status: r.status, corpo: j }; }); });
+}
+
+function f4_entrar(mail, senha) {
+  var c = supaCfg();
+  return fetch(c.url + "/auth/v1/token?grant_type=password", {
+    method: "POST",
+    headers: { apikey: c.key, "Content-Type": "application/json" },
+    body: JSON.stringify({ email: String(mail).trim().toLowerCase(), password: senha })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); });
+}
+
+function f4_esquecer_servidor() {
+  try { SUPA_TOKEN = null; SUPA_EXP = 0; SUPA_USER = ""; esquecerSessaoSupa(); } catch (e) {}
+  F4_IDENT = null;
+}
+
+function f4_espelhar(ident) {
+  if (!find(DB.tenants, "vyoha")) {
+    DB.tenants.push({
+      id: "vyoha", nome: "Vyoha", slug: "console", token: "", cidade: "", uf: "", cnpj: "",
+      segmento: "Plataforma", matriz_id: null, status: "ativo", situacao: "ativa",
+      criada: today(), licenca: null
+    });
   }
-  window.rpcConsole = rpc;
+  var u = DB.users.filter(function (x) {
+    return String(x.email).toLowerCase() === String(ident.email).toLowerCase();
+  })[0];
+  if (!u) { u = { id: uid("u") }; DB.users.push(u); }
+  u.email = ident.email;
+  u.nome = ident.nome || ident.email;
+  u.tenant_id = "vyoha";
+  u.perfil = "vyoha";
+  u.cargo = "Vyoha";
+  u.status = "ativo";
+  u.trocar_senha = !!ident.trocar_senha;
+  u.bloqueado_ate = null;
+  u.tentativas = 0;
+  delete u.provisoria; delete u.senha; delete u.senha_hash; delete u.salt; delete u.acesso;
+  save();
+  return u;
+}
 
-  function entrarNoSupabase(mail, senha) {
-    var c = supaCfg();
-    return fetch(c.url + "/auth/v1/token?grant_type=password", {
-      method: "POST", headers: { apikey: c.key, "Content-Type": "application/json" },
-      body: JSON.stringify({ email: String(mail).trim().toLowerCase(), password: senha })
-    }).then(function (r) { return r.json(); });
-  }
+function f4_sincronizar(depois) {
+  if (!SUPA_TOKEN) { if (depois) depois(false); return; }
+  var colecoes = ["faturas", "contratos", "implantacoes", "planos", "solicitacoes", "tickets", "despesas"];
+  var pendentes = 2 + colecoes.length;
+  function fim() { if (--pendentes <= 0) { save(); if (depois) depois(true); } }
 
-  function espelharIdentidade(ident) {
-    if (!find(DB.tenants, "vyoha")) {
-      DB.tenants.push({ id: "vyoha", nome: "Vyoha", slug: "console", token: "", cidade: "", uf: "", cnpj: "",
-        segmento: "Plataforma", matriz_id: null, status: "ativo", situacao: "ativa", criada: today(), licenca: null });
-    }
-    var u = DB.users.filter(function (x) { return String(x.email).toLowerCase() === String(ident.email).toLowerCase(); })[0];
-    if (!u) { u = { id: uid("u"), tenant_id: "vyoha", perfil: "vyoha", cargo: "Vyoha", tel: "", status: "ativo" }; DB.users.push(u); }
-    u.email = ident.email; u.nome = ident.nome || ident.email;
-    u.tenant_id = "vyoha"; u.perfil = "vyoha";
-    u.status = ident.ok ? "ativo" : "inativo";
-    u.trocar_senha = !!ident.trocar_senha;
-    delete u.provisoria; delete u.senha; delete u.senha_hash; delete u.salt;
-    return u;
-  }
-
-  function sincronizarRede(depois) {
-    if (!supaAutenticado()) return depois && depois(false);
-    var colecoes = ["faturas","contratos","implantacoes","planos","solicitacoes","tickets","despesas"];
-    var pendentes = 2 + colecoes.length;
-    function fim() { if (--pendentes <= 0) { save(); if (depois) depois(true); } }
-
-    rpc("rede_empresas").then(function (r) {
-      if (Array.isArray(r.corpo)) r.corpo.forEach(function (e) {
+  f4_rpc("rede_empresas").then(function (r) {
+    if (Array.isArray(r.corpo)) {
+      r.corpo.forEach(function (e) {
         var t = find(DB.tenants, e.tenant_id);
         if (!t) { t = { id: e.tenant_id, criada: today() }; DB.tenants.push(t); }
-        t.nome = e.nome; t.status = e.ativo ? "ativo" : "inativo";
-        t.matriz_id = e.matriz_id || null; t.email_admin = e.email_admin || "";
-        t.indicadores = { acessos: e.acessos, ativos: e.ativos, vendas: e.vendas, faturado: e.faturado, em_aberto: e.em_aberto };
+        t.nome = e.nome;
+        t.status = e.ativo ? "ativo" : "inativo";
+        t.matriz_id = e.matriz_id || null;
+        t.email_admin = e.email_admin || "";
+        t.indicadores = { acessos: e.acessos, ativos: e.ativos, vendas: e.vendas,
+                          faturado: e.faturado, em_aberto: e.em_aberto };
       });
-      fim();
-    }).catch(fim);
+    }
+    fim();
+  }).catch(fim);
 
-    rpc("rede_acessos").then(function (r) {
-      if (Array.isArray(r.corpo)) r.corpo.forEach(function (a) {
-        var u = DB.users.filter(function (x) { return String(x.email).toLowerCase() === String(a.email).toLowerCase(); })[0];
+  f4_rpc("rede_acessos").then(function (r) {
+    if (Array.isArray(r.corpo)) {
+      r.corpo.forEach(function (a) {
+        var u = DB.users.filter(function (x) {
+          return String(x.email).toLowerCase() === String(a.email).toLowerCase();
+        })[0];
         if (!u) { u = { id: uid("u") }; DB.users.push(u); }
-        u.user_id = a.user_id; u.email = a.email; u.nome = a.nome; u.tenant_id = a.tenant_id;
-        u.perfil = a.perfil; u.status = a.ativo ? "ativo" : "inativo"; u.cargo = a.cargo || "";
-        u.ultimo_acesso = a.ultimo_acesso; u.acessos = a.acessos; u.trocar_senha = !!a.trocar_senha;
+        u.user_id = a.user_id;
+        u.email = a.email; u.nome = a.nome; u.tenant_id = a.tenant_id;
+        u.perfil = a.perfil; u.status = a.ativo ? "ativo" : "inativo";
+        u.cargo = a.cargo || ""; u.ultimo_acesso = a.ultimo_acesso;
+        u.acessos = a.acessos; u.trocar_senha = !!a.trocar_senha;
         delete u.provisoria; delete u.senha; delete u.senha_hash; delete u.salt;
       });
+    }
+    fim();
+  }).catch(fim);
+
+  colecoes.forEach(function (col) {
+    f4_rpc("console_listar", { colecao: col }).then(function (r) {
+      if (Array.isArray(r.corpo)) {
+        DB[col] = r.corpo.map(function (x) {
+          var d = x.dados || {};
+          d.id = x.id; d.tenant_id = x.tenant_id;
+          d.criado_em = x.criado_em; d.atualizado_em = x.atualizado_em;
+          return d;
+        });
+      }
       fim();
     }).catch(fim);
+  });
+}
 
-    colecoes.forEach(function (col) {
-      rpc("console_listar", { colecao: col }).then(function (r) {
-        if (Array.isArray(r.corpo)) DB[col] = r.corpo.map(function (x) {
-          var d = x.dados || {}; d.id = x.id; d.tenant_id = x.tenant_id;
-          d.criado_em = x.criado_em; d.atualizado_em = x.atualizado_em; return d;
-        });
-        fim();
-      }).catch(fim);
-    });
+function f4_render() {
+  f4_marca("login");
+  try { el("cs-brand").innerHTML = marcaVyoha(30); } catch (e) {}
+  try { el("app").style.display = "none"; el("login").style.display = ""; } catch (e) {}
+  var eq = el("cs-equipe");
+  if (eq) {
+    eq.innerHTML =
+      '<div class="sm mut">Acesso exclusivo da equipe Vyoha. As credenciais sao criadas ' +
+      "pelo servidor e entregues por canal privado.</div>" +
+      '<button onclick="recuperarAcesso()" style="justify-content:center;color:var(--brand);' +
+      'font-size:12.5px;font-weight:620;margin-top:6px">Nao consigo entrar</button>';
   }
-  window.sincronizarRede = sincronizarRede;
+}
 
-  window.salvarNaRede = function (colecao, registro, depois) {
-    return rpc("console_salvar", { colecao: colecao, registro: registro }).then(function (r) {
-      if (r.corpo && r.corpo.erro) toast(r.corpo.erro, "er");
-      if (depois) depois(r.corpo); return r.corpo;
-    });
-  };
-  window.apagarNaRede = function (colecao, id, depois) {
-    return rpc("console_apagar", { colecao: colecao, alvo: id }).then(function (r) {
-      if (depois) depois(r.corpo); return r.corpo; });
-  };
+function f4_erroLogin(m) {
+  var err = el("cs-err");
+  if (err) {
+    err.innerHTML = "<span>" + (typeof ICON === "object" && ICON.alert ? ICON.alert : "") +
+                    "</span><div>" + m + "</div>";
+    err.classList.remove("hidden");
+  }
+}
 
-  window.credencialPendente = function () { return null; };
+function f4_abrir(ident) {
+  F4_IDENT = ident;
+  var u = f4_espelhar(ident);
+  var s = abrirSessao(u);
+  Sess = marcarSessao({ user_id: u.id, sess_id: s.id });
+  Store.set(CKEY, JSON.stringify(Sess));
+  save();
+  var err = el("cs-err"); if (err) err.classList.add("hidden");
+  iniciar();
+  f4_marca("dentro");
+  f4_sincronizar(function () { try { if (View.pg) ir(View.pg, View.p); } catch (e) {} });
+  if (ident.trocar_senha) { try { trocaObrigatoria(); } catch (e) {} }
+}
 
-  var renderLoginAntigo = window.renderLogin;
-  window.renderLogin = function () {
-    renderLoginAntigo.apply(this, arguments);
-    var eq = el("cs-equipe");
-    if (eq) eq.innerHTML =
-      '<div class="sm mut">Acesso exclusivo da equipe Vyoha. As credenciais sao criadas pelo servidor e entregues por canal privado.</div>' +
-      '<button onclick="recuperarAcesso()" style="justify-content:center;color:var(--brand);font-size:12.5px;font-weight:620;margin-top:6px">Nao consigo entrar</button>';
-  };
-
-  function supaSairSilencioso() { SUPA_TOKEN = null; SUPA_EXP = 0; SUPA_USER = ""; esquecerSessaoSupa(); }
-
-  window.doLogin = function () {
-    var mail = String(v("cs-mail")).trim().toLowerCase();
-    var senha = v("cs-pass");
-    var err = el("cs-err");
-    function falha(m) { err.innerHTML = "<span>" + ICON.alert + "</span><div>" + m + "</div>"; err.classList.remove("hidden"); }
-    if (!mail || !senha) return falha("Informe o e-mail e a senha.");
-    err.classList.add("hidden");
-    entrarNoSupabase(mail, senha).then(function (j) {
-      if (!j || !j.access_token) {
-        return falha(j && (j.error_description || j.msg) ? (j.error_description || j.msg) : "E-mail ou senha incorretos.");
+function f4_doLogin() {
+  var mail = String(v("cs-mail")).trim().toLowerCase();
+  var senha = v("cs-pass");
+  if (!mail || !senha) { f4_erroLogin("Informe o e-mail e a senha."); return; }
+  f4_marca("entrando");
+  f4_entrar(mail, senha).then(function (x) {
+    if (!x.ok || !x.j.access_token) {
+      f4_marca("negado");
+      f4_erroLogin("E-mail ou senha incorretos.");
+      return;
+    }
+    guardarSessaoSupa(x.j, mail);
+    return f4_rpc("meu_acesso").then(function (r) {
+      var ident = r.corpo || {};
+      if (!ident.ok || ident.perfil !== "vyoha") {
+        f4_esquecer_servidor();
+        f4_marca("sem-permissao");
+        f4_erroLogin("Este acesso nao pertence a equipe Vyoha.");
+        return;
       }
-      guardarSessaoSupa(j, mail);
-      return rpc("meu_acesso").then(function (r) {
-        var ident = r.corpo || {};
-        if (!ident.ok) {
-          supaSairSilencioso();
-          return falha(ident.motivo === "desativado" ? "Este acesso esta desativado."
-            : ident.motivo === "empresa_suspensa" ? "O ambiente esta suspenso."
-            : "Este acesso nao esta ligado a nenhuma empresa.");
-        }
-        if (ident.perfil !== "vyoha") {
-          supaSairSilencioso();
-          return falha("Este console e exclusivo da equipe Vyoha. Use o endereco do sistema da sua empresa.");
-        }
-        IDENT = ident;
-        var u = espelharIdentidade(ident);
-        var s = abrirSessao(u);
-        Sess = marcarSessao({ user_id: u.id, sess_id: s.id });
-        Store.set(CKEY, JSON.stringify(Sess));
-        auditar("Login no console", u.nome, u.email);
-        save(); iniciar();
-        sincronizarRede(function () { if (View.pg) ir(View.pg, View.p); });
-        if (ident.trocar_senha) trocaObrigatoria();
-      });
-    }).catch(function () { falha("Sem resposta do servidor. Verifique a sua internet."); });
-  };
-
-  window.salvarTrocaObrigatoria = function () {
-    var a = v("ts-a"), b = v("ts-b"), err = el("ts-err");
-    function falha(m) { err.innerHTML = m; err.classList.remove("hidden"); }
-    if (!a || a.length < 8) return falha("A senha precisa de pelo menos 8 caracteres.");
-    if (a !== b) return falha("As duas senhas nao conferem.");
-    var c = supaCfg();
-    fetch(c.url + "/auth/v1/user", {
-      method: "PUT",
-      headers: { apikey: c.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/json" },
-      body: JSON.stringify({ password: a })
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (x) {
-        if (!x.ok) return falha((x.j && (x.j.msg || x.j.error_description)) || "Nao foi possivel trocar a senha.");
-        return rpc("senha_definida").then(function () {
-          var u = me(); if (u) { u.trocar_senha = false; save(); }
-          fecharModal(); toast("Senha definida.", "ok");
-        });
-      }).catch(function () { falha("Sem resposta do servidor."); });
-  };
-
-  window.criarAcessoNoServidor = function (email, nome, tenant, perfil, depois) {
-    return rpc("console_criar_acesso", { p_email: email, p_nome: nome, p_tenant: tenant, p_perfil: perfil || "admin" })
-      .then(function (r) { var res = r.corpo || {}; if (res.erro) toast(res.erro, "er"); if (depois) depois(res); return res; });
-  };
-  window.redefinirSenhaNoServidor = function (userId, depois) {
-    return rpc("console_redefinir_senha", { alvo: userId })
-      .then(function (r) { var res = r.corpo || {}; if (res.erro) toast(res.erro, "er"); if (depois) depois(res); return res; });
-  };
-
-  var sairAntigo = window.sair;
-  window.sair = function () { IDENT = null; supaSairSilencioso(); sairAntigo.apply(this, arguments); };
-
-  window.restaurar = function () { return false; };
-
-  function arrancarConsole() {
-    var guardada = sessaoSupaGuardada();
-    if (!guardada || !guardada.refresh) { renderLogin(); return; }
-    religarSupabase(function (ok) {
-      if (!ok) { renderLogin(); return; }
-      rpc("meu_acesso").then(function (r) {
-        var ident = r.corpo || {};
-        if (!ident.ok || ident.perfil !== "vyoha") { supaSairSilencioso(); renderLogin(); return; }
-        IDENT = ident;
-        var u = espelharIdentidade(ident);
-        var s = abrirSessao(u);
-        Sess = marcarSessao({ user_id: u.id, sess_id: s.id });
-        Store.set(CKEY, JSON.stringify(Sess));
-        save(); iniciar();
-        sincronizarRede(function () { if (View.pg) ir(View.pg, View.p); });
-        if (ident.trocar_senha) trocaObrigatoria();
-      }).catch(function () { renderLogin(); });
+      f4_abrir(ident);
     });
+  }).catch(function (e) {
+    f4_falhou("login", e);
+    f4_erroLogin("Sem resposta do servidor. Tente de novo.");
+  });
+}
+
+function f4_salvarTroca() {
+  var err = el("ts-err");
+  function bad(m) {
+    if (err) {
+      err.innerHTML = "<span>" + (typeof ICON === "object" && ICON.alert ? ICON.alert : "") +
+                      "</span><div>" + m + "</div>";
+      err.classList.remove("hidden");
+    }
   }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", arrancarConsole);
-  else setTimeout(arrancarConsole, 0);
-})();
+  var u = me() || {};
+  var a = v("ts-a"), b = v("ts-b");
+  var msg = senhaFraca(a, u.nome, u.email);
+  if (msg) { bad(msg); return; }
+  if (a !== b) { bad("A confirmacao nao confere."); return; }
+  var c = supaCfg();
+  fetch(c.url + "/auth/v1/user", {
+    method: "PUT",
+    headers: { apikey: c.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ password: a })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (x) {
+      if (!x.ok) { bad("O servidor nao aceitou esta senha."); return; }
+      u.trocar_senha = false;
+      if (F4_IDENT) F4_IDENT.trocar_senha = false;
+      save();
+      f4_rpc("senha_definida").catch(function () {});
+      fecharModal();
+      toast("Senha definida.", "ok");
+    }).catch(function () { bad("Sem resposta do servidor."); });
+}
+
+function f4_sair() {
+  try { if (Sess) { encerrarSessao(Sess.sess_id, "logout"); } } catch (e) {}
+  Sess = null;
+  try { Store.del(CKEY); } catch (e) {}
+  f4_esquecer_servidor();
+  f4_render();
+}
+
+function f4_arrancar() {
+  f4_marca("arranque");
+  var g = null;
+  try { g = sessaoSupaGuardada(); } catch (e) {}
+  if (!g || !g.refresh) { f4_render(); return; }
+  try {
+    religarSupabase(function (ok) {
+      if (!ok) { f4_render(); return; }
+      f4_rpc("meu_acesso").then(function (r) {
+        var ident = r.corpo || {};
+        if (!ident.ok || ident.perfil !== "vyoha") {
+          f4_esquecer_servidor(); f4_render(); return;
+        }
+        f4_abrir(ident);
+      }).catch(function (e) { f4_falhou("arranque", e); f4_render(); });
+    });
+  } catch (e) { f4_falhou("religar", e); f4_render(); }
+}
+
+renderLogin = f4_render;
+doLogin = f4_doLogin;
+sair = f4_sair;
+restaurar = function () { return false; };
+salvarTrocaObrigatoria = f4_salvarTroca;
+credencialPendente = function () { return null; };
+recuperarAcesso = function () {
+  modal("Nao consigo entrar",
+    nota("As credenciais do console sao criadas e redefinidas pelo servidor. " +
+         "Fale com a Vyoha para receber uma senha nova.", "wr"),
+    '<button class="btn" onclick="fecharModal()">Fechar</button>');
+};
+gerarAcessoEmergencia = function () { try { fecharModal(); } catch (e) {} };
+
+window.renderLogin = renderLogin;
+window.doLogin = doLogin;
+window.sair = sair;
+window.restaurar = restaurar;
+window.salvarTrocaObrigatoria = salvarTrocaObrigatoria;
+window.credencialPendente = credencialPendente;
+window.recuperarAcesso = recuperarAcesso;
+window.gerarAcessoEmergencia = gerarAcessoEmergencia;
+window.identidadeDoServidor = function () { return F4_IDENT; };
+window.rpcConsole = f4_rpc;
+window.sincronizarRede = f4_sincronizar;
+window.salvarNaRede = function (colecao, registro, depois) {
+  return f4_rpc("console_salvar", { colecao: colecao, registro: registro })
+    .then(function (r) {
+      if (r.corpo && r.corpo.erro) { try { toast(r.corpo.erro, "er"); } catch (e) {} }
+      if (depois) depois(r.corpo);
+      return r.corpo;
+    });
+};
+window.apagarNaRede = function (colecao, id, depois) {
+  return f4_rpc("console_apagar", { colecao: colecao, alvo: id })
+    .then(function (r) { if (depois) depois(r.corpo); return r.corpo; });
+};
+
+f4_marca("camada-ativa");
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", f4_arrancar);
+} else {
+  setTimeout(f4_arrancar, 0);
+}
 
 </script>
 </body>
