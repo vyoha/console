@@ -4708,7 +4708,20 @@ function f4_salvarTroca() {
     body: JSON.stringify({ password: a })
   }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
     .then(function (x) {
-      if (!x.ok) { bad("O servidor nao aceitou esta senha."); return; }
+      if (!x.ok) {
+        var m = (x.j && (x.j.msg || x.j.message || x.j.error_description || x.j.error)) || "";
+        if (/different from the old password/i.test(m)) {
+          m = "Escolha uma senha diferente da que voce esta usando agora.";
+        } else if (/should be at least|at least 6 characters|Password should be/i.test(m)) {
+          m = "O servidor exige uma senha mais longa. Use pelo menos 6 caracteres.";
+        } else if (/weak|pwned|compromised/i.test(m)) {
+          m = "O servidor recusou esta senha por ser fraca ou conhecida em vazamentos.";
+        } else if (!m) {
+          m = "O servidor nao aceitou esta senha.";
+        }
+        bad(m);
+        return;
+      }
       u.trocar_senha = false;
       if (F4_IDENT) F4_IDENT.trocar_senha = false;
       save();
