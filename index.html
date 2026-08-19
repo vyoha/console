@@ -4803,6 +4803,322 @@ if (document.readyState === "loading") {
   setTimeout(f4_arrancar, 0);
 }
 
+
+
+/* ===============================================================
+   VYOHA CONSOLE · FASE 5 · O CLIENTE NASCE NO SERVIDOR
+   A fase 4 tirou o login das maos do arquivo. Esta tira o cadastro.
+   Empresa, contrato, implantacao e o acesso do administrador
+   passam a nascer em funcoes do banco. O banco local continua,
+   como cache de tela. Tambem conserta lead ganho -> empresa, que
+   chamava leadParaEmpresa, uma funcao que nunca existiu.
+   =============================================================== */
+var F5_ENTREGA = {};
+
+function f5_erro(r, padrao) {
+  var c = (r && r.corpo) || {};
+  if (c.erro) return c.erro;
+  if (r && r.status >= 400) return padrao + " (" + r.status + ")";
+  return null;
+}
+
+function f5_poe(campo, valor) {
+  var e = el(campo);
+  if (e && valor) e.value = valor;
+}
+
+function f5_leadParaEmpresa(id) {
+  var l = leadPorId(id);
+  if (!l) { toast("Lead nao encontrado.", "err"); return; }
+  modalEmpresa();
+  setTimeout(function () {
+    f5_poe("em-nome", l.empresa);
+    f5_poe("em-mail", l.email);
+    f5_poe("em-rep", l.nome);
+    f5_poe("em-tel", l.telefone);
+    f5_poe("em-whats", l.telefone);
+    f5_poe("em-seg", l.segmento);
+    f5_poe("em-cid", l.cidade);
+    f5_poe("em-func", l.funcionarios || l.porte);
+    var n = el("em-nome");
+    if (n) { n.focus(); }
+  }, 90);
+}
+window.leadParaEmpresa = f5_leadParaEmpresa;
+
+function f5_dadosDoFormulario() {
+  var nome = v("em-nome");
+  return {
+    nome: nome,
+    email: String(v("em-mail")).trim().toLowerCase(),
+    razao: v("em-razao"), cnpj: v("em-cnpj"), ie: v("em-ie"),
+    segmento: v("em-seg"), cidade: v("em-cid"), uf: String(v("em-uf")).toUpperCase(),
+    funcionarios: v("em-func"), endereco: v("em-end"),
+    tel: dig(v("em-tel")), whats: dig(v("em-whats")),
+    representante: v("em-rep"),
+    slug: String(v("em-slug") || nome).toLowerCase().replace(/[^a-z0-9]/g, "").substring(0, 18),
+    licenca: {
+      tipo: "vitalicia",
+      valor_licenca: nv("em-lic"), valor: nv("em-man"),
+      dia_venc: Math.min(28, Math.max(1, nv("em-dia") || 10)),
+      inicio: today(), pagamento_inicial: false, status: "pendente",
+      modulos: MODULOS_PADRAO.slice(), extras: {},
+      limites: {
+        admins: Math.max(1, nv("em-adm") || LIMITES_PADRAO.admins),
+        pdvs: Math.max(0, nv("em-pdv") || LIMITES_PADRAO.pdvs),
+        operacionais: Math.max(0, nv("em-op") || LIMITES_PADRAO.operacionais),
+        armazenamento: LIMITES_PADRAO.armazenamento
+      }
+    }
+  };
+}
+
+function f5_espelharEmpresa(tid, d, matriz, novo) {
+  var t = find(DB.tenants, tid);
+  if (!t) {
+    t = { id: tid, tipo: "empresa", status: "ativo", situacao: "contrato_assinado",
+          provisionado: false, criada: today(), token: null, obs: "", tags: [] };
+    DB.tenants.push(t);
+  }
+  t.nome = d.nome; t.email = d.email; t.matriz_id = matriz || null;
+  ["razao","cnpj","ie","segmento","cidade","uf","funcionarios","endereco","tel","whats","representante","slug"]
+    .forEach(function (k) { t[k] = d[k]; });
+  if (novo || !t.licenca) t.licenca = d.licenca;
+  return t;
+}
+
+function f5_salvarEmpresa(id) {
+  var d = f5_dadosDoFormulario();
+  if (String(d.nome).length < 3) { toast("Informe o nome fantasia.", "err"); return; }
+  if (!id && String(d.email).indexOf("@") < 0) { toast("Informe o e-mail do administrador.", "err"); return; }
+  var matriz = el("em-matriz") ? (v("em-matriz") || null) : ((find(DB.tenants, id) || {}).matriz_id || null);
+  if (matriz) {
+    var hd = find(DB.tenants, matriz);
+    if (hd && !ehHolding(hd)) { toast("So uma holding pode receber empresas.", "err"); return; }
+    if (hd && vagasRede(hd).cheia) { toast("A rede " + hd.nome + " esta no limite contratado.", "err"); return; }
+  }
+  d.matriz_id = matriz;
+
+  var pedido = id
+    ? rpcConsole("console_salvar_empresa", { p_tenant: id, p_dados: d })
+    : rpcConsole("console_criar_empresa", { p_dados: d });
+
+  pedido.then(function (r) {
+    var m = f5_erro(r, "O servidor recusou o cadastro");
+    if (m) { toast(m, "err"); return; }
+    var c = r.corpo || {};
+    var tid = c.tenant_id || id;
+    f5_espelharEmpresa(tid, d, matriz, !id);
+    save(); fecharModal();
+    toast(id ? "Cadastro atualizado no servidor." : "Empresa cadastrada no servidor.", "ok");
+    sincronizarRede(function () { verEmpresa(tid, "empresa"); });
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+}
+
+function f5_confirmarPagamentoInicial(id) {
+  var t = find(DB.tenants, id);
+  if (!t) { toast("Empresa nao encontrada.", "err"); return; }
+  modal("Confirmar pagamento e criar ambiente de " + esc(t.nome),
+    nota("Ao confirmar, <b>o servidor</b> cria o ambiente e o acesso do administrador. " +
+         "A senha temporaria e gerada la e aparece <b>uma unica vez</b>, na tela seguinte. " +
+         "Ninguem escolhe senha aqui.", "wr") +
+    ln("Licenca vitalicia", money(t.licenca ? t.licenca.valor_licenca : 0)) +
+    ln("Manutencao mensal", money(t.licenca ? t.licenca.valor : 0)) +
+    ln("E-mail do administrador", t.email || "-"),
+    '<button class="btn" onclick="fecharModal()">Cancelar</button>' +
+    '<button class="btn btn-p btn-g" onclick="confirmarProvisionamento(\'' + id + '\')">Confirmar pagamento e liberar</button>');
+}
+
+function f5_publicarFaturas(tid) {
+  (DB.faturas || []).filter(function (f) { return f.tenant_id === tid; })
+    .forEach(function (f) { try { salvarNaRede("faturas", f); } catch (e) {} });
+}
+
+function f5_confirmarProvisionamento(id) {
+  var t = find(DB.tenants, id);
+  if (!t) { toast("Empresa nao encontrada.", "err"); return; }
+  toast("Falando com o servidor...", "ok");
+  rpcConsole("console_provisionar_empresa",
+             { p_tenant: id, p_perfil: ehHolding(t) ? "holding" : "admin" })
+    .then(function (r) {
+      var m = f5_erro(r, "O servidor recusou a liberacao");
+      if (m) { toast(m, "err"); return; }
+      var c = r.corpo || {};
+      t.token = c.token || t.token;
+      t.provisionado = true;
+      t.situacao = "implantacao";
+      t.implantada = today();
+      if (t.licenca) { t.licenca.pagamento_inicial = true; t.licenca.status = "ativa"; }
+      if (!DB.config.filter(function (x) { return x.tenant_id === t.id; }).length) {
+        DB.config.push(novaConfig(t.id, t.nome));
+      }
+      F5_ENTREGA[id] = { email: c.email, senha: c.senha_temporaria || null, token: c.token };
+      try { gerarFaturas(t); } catch (e) {}
+      f5_publicarFaturas(id);
+      try { publicarAmbienteConsole(t); } catch (e) {}
+      save();
+      fecharModal();
+      f5_modalEntrega(id);
+      sincronizarRede(function () {});
+    }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+}
+
+function f5_modalEntrega(id) {
+  var t = find(DB.tenants, id) || {};
+  var d = F5_ENTREGA[id] || {};
+  modal("Acesso de " + esc(t.nome || ""),
+    nota("Esta senha foi criada pelo servidor e <b>aparece uma unica vez</b>. Ela nao fica " +
+         "guardada em lugar nenhum - nem aqui, nem no arquivo publicado. Envie por canal privado.", "wr") +
+    ln("Endereco", "app.vyoha.com.br") +
+    ln("Token da empresa", d.token || t.token || "-") +
+    ln("E-mail do administrador", d.email || t.email || "-") +
+    ln("Senha temporaria", d.senha || "o acesso ja existia - use Gerar nova senha") +
+    '<div class="sm mut" style="margin-top:12px">No primeiro acesso o sistema obriga a troca da senha.</div>',
+    '<button class="btn" onclick="fecharModal()">Fechar</button>' +
+    '<button class="btn btn-p" onclick="f5_copiarEntrega(\'' + id + '\')">Copiar dados</button>');
+}
+
+function f5_copiarEntrega(id) {
+  var t = find(DB.tenants, id) || {};
+  var d = F5_ENTREGA[id] || {};
+  copiar("Acesso Vyoha - " + (t.nome || "") +
+         "\nEndereco: app.vyoha.com.br" +
+         "\nToken: " + (d.token || t.token || "") +
+         "\nE-mail: " + (d.email || t.email || "") +
+         "\nSenha temporaria: " + (d.senha || "(gere uma nova)") +
+         "\nNo primeiro acesso o sistema pede a troca da senha.");
+  auditar("Dados de acesso copiados", t.nome, "entrega ao cliente", id);
+}
+
+function f5_novaSenha(id, userId) {
+  rpcConsole("console_redefinir_senha", { alvo: userId }).then(function (r) {
+    var m = f5_erro(r, "O servidor recusou a redefinicao");
+    if (m) { toast(m, "err"); return; }
+    var c = r.corpo || {};
+    F5_ENTREGA[id] = { email: c.email, senha: c.senha_temporaria, token: (find(DB.tenants, id) || {}).token };
+    f5_modalEntrega(id);
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+}
+
+function f5_modalCredenciais(id) {
+  var d = F5_ENTREGA[id];
+  if (d && d.senha) { f5_modalEntrega(id); return; }
+  var t = find(DB.tenants, id) || {};
+  var adm = DB.users.filter(function (u) {
+    return u.tenant_id === id && (u.perfil === "admin" || u.perfil === "holding");
+  })[0];
+  modal("Acesso de " + esc(t.nome || ""),
+    nota("A senha do cliente nao existe neste arquivo. Quem guarda e o servidor, e nem ele mostra: " +
+         "so da para gerar uma nova temporaria.", "inf") +
+    ln("Endereco", "app.vyoha.com.br") +
+    ln("Token da empresa", t.token || "-") +
+    ln("E-mail do administrador", (adm && adm.email) || t.email || "-"),
+    '<button class="btn" onclick="fecharModal()">Fechar</button>' +
+    (adm && adm.user_id
+      ? '<button class="btn btn-d" onclick="f5_novaSenha(\'' + id + '\',\'' + adm.user_id + '\')">Gerar nova senha</button>'
+      : '<div class="sm mut" style="align-self:center">Sem acesso criado ainda.</div>'));
+}
+
+function f5_excluirEmpresa(id) {
+  var t = find(DB.tenants, id);
+  if (!t) { toast("Empresa nao encontrada.", "err"); return; }
+  if (String(v("ex-nome")).trim().toLowerCase() !== String(t.nome).trim().toLowerCase()) {
+    toast("Digite o nome exato da empresa para confirmar.", "err");
+    return;
+  }
+  rpcConsole("console_excluir_empresa", { p_tenant: id }).then(function (r) {
+    var m = f5_erro(r, "O servidor recusou a exclusao");
+    if (m) { toast(m, "err"); return; }
+    var nome = t.nome;
+    ["customers","products","moves","sales","parcels","cash","metas","cobrancas","acordos",
+     "faturas","tickets","growth","solicitacoes","implantacoes","contratos","config","users","sessoes"]
+      .forEach(function (col) {
+        DB[col] = (DB[col] || []).filter(function (x) { return x.tenant_id !== id; });
+      });
+    DB.tenants = DB.tenants.filter(function (x) { return x.id !== id; });
+    DB.removidos = DB.removidos || [];
+    if (DB.removidos.indexOf(id) < 0) DB.removidos.push(id);
+    try { supaPedido("/rest/v1/ambientes?tenant_id=eq." + encodeURIComponent(id), { method: "DELETE" }); } catch (e) {}
+    save(); fecharModal();
+    toast(nome + " foi excluida no servidor.", "ok");
+    ir("empresas");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+}
+
+function f5_sincronizar(depois) {
+  f4_sincronizar(function () {
+    f4_rpc("console_empresas").then(function (r) {
+      if (Array.isArray(r.corpo)) {
+        r.corpo.forEach(function (e) {
+          var t = find(DB.tenants, e.tenant_id);
+          if (!t) { t = { id: e.tenant_id, tipo: "empresa" }; DB.tenants.push(t); }
+          var d = e.dados || {};
+          t.nome = e.nome;
+          t.matriz_id = e.matriz_id || null;
+          t.token = e.token || null;
+          t.email = e.email_admin || t.email;
+          t.provisionado = !!e.token;
+          t.status = e.ativo ? "ativo" : "inativo";
+          Object.keys(d).forEach(function (k) { t[k] = d[k]; });
+          if (!t.criada) t.criada = d.criada || today();
+        });
+      }
+      save();
+      if (depois) depois(true);
+    }).catch(function () { if (depois) depois(false); });
+  });
+}
+
+criarContaNuvemConsole = function (email, senha, tenantId, papel, nome, depois) {
+  if (depois) depois(false, "O acesso do cliente e criado pelo servidor.");
+};
+registrarEmpresaNuvem = function (t, depois) { if (depois) depois(true); };
+publicarMapaDaRede = function () {
+  toast("O mapa da rede ja vive no servidor. Nao ha o que publicar.", "ok");
+};
+publicarTudoSozinho = function () {
+  if (!supaConfigurado() || typeof SUPA_TOKEN === "undefined" || !SUPA_TOKEN) return;
+  var liberadas = DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; });
+  if (!liberadas.length) return;
+  var agora = retratoDaRede();
+  if (Store.get(K_MAPA_ENVIADO) === agora) return;
+  supaPedido("/rest/v1/ambientes", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(liberadas.map(function (t) {
+      return { tenant_id: t.id, dados: pacoteAmbienteConsole(t) };
+    }))
+  }).then(function (r) {
+    if (r.ok) { try { Store.set(K_MAPA_ENVIADO, agora); } catch (e) {} }
+  }).catch(function () {});
+};
+provisionar = function () {
+  toast("A liberacao do ambiente passou a ser feita pelo servidor.", "err");
+};
+
+salvarEmpresa = f5_salvarEmpresa;
+confirmarPagamentoInicial = f5_confirmarPagamentoInicial;
+confirmarProvisionamento = f5_confirmarProvisionamento;
+modalCredenciais = f5_modalCredenciais;
+excluirEmpresa = f5_excluirEmpresa;
+
+window.salvarEmpresa = salvarEmpresa;
+window.confirmarPagamentoInicial = confirmarPagamentoInicial;
+window.confirmarProvisionamento = confirmarProvisionamento;
+window.modalCredenciais = modalCredenciais;
+window.excluirEmpresa = excluirEmpresa;
+window.criarContaNuvemConsole = criarContaNuvemConsole;
+window.registrarEmpresaNuvem = registrarEmpresaNuvem;
+window.publicarMapaDaRede = publicarMapaDaRede;
+window.publicarTudoSozinho = publicarTudoSozinho;
+window.provisionar = provisionar;
+window.f5_copiarEntrega = f5_copiarEntrega;
+window.f5_novaSenha = f5_novaSenha;
+window.f5_modalEntrega = f5_modalEntrega;
+window.sincronizarRede = f5_sincronizar;
+
+try { document.body.setAttribute("data-f5", "ativa"); } catch (e) {}
+
 </script>
 </body>
 </html>
