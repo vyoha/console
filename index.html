@@ -5119,6 +5119,317 @@ window.sincronizarRede = f5_sincronizar;
 
 try { document.body.setAttribute("data-f5", "ativa"); } catch (e) {}
 
+
+
+/* ===============================================================
+   VYOHA CONSOLE · FASE 6 · SENHA NENHUMA MORA MAIS AQUI
+   A fase 4 tirou o login do arquivo. A 5 tirou o cadastro da
+   empresa. Esta tira o acesso das pessoas: a tela de Acessos
+   parou de falar com a tabela perfis (que responde 401 desde o
+   endurecimento) e passa a usar as RPCs. Redefinir senha nao tem
+   mais campo de senha. protegerSenha e conferirSenha viram nada.
+   =============================================================== */
+var F6_ENTREGA = {};
+
+function f6_erro(r, padrao) {
+  var c = (r && r.corpo) || {};
+  if (c.erro) return c.erro;
+  if (r && r.status >= 400) return padrao + " (" + r.status + ")";
+  return null;
+}
+
+function f6_carregarPerfisNuvem() {
+  PERFIS_NUVEM.carregando = true;
+  PERFIS_NUVEM.erro = "";
+  pintarAcessos();
+  rpcConsole("rede_acessos").then(function (r) {
+    if (!Array.isArray(r.corpo)) {
+      PERFIS_NUVEM.carregando = false;
+      PERFIS_NUVEM.erro = (r.corpo && r.corpo.erro) || "O servidor nao devolveu a lista de acessos.";
+      pintarAcessos();
+      return;
+    }
+    PERFIS_NUVEM.lista = r.corpo.map(function (a) {
+      return {
+        user_id: a.user_id, email: a.email, nome: a.nome,
+        tenant_id: a.tenant_id, perfil: a.perfil,
+        ativo: a.ativo !== false, cargo: a.cargo || "", tel: a.tel || "",
+        criado_em: a.criado_em, ultimo_acesso: a.ultimo_acesso,
+        acessos: a.acessos, trocar_senha: !!a.trocar_senha
+      };
+    });
+    PERFIS_NUVEM.carregando = false;
+    pintarAcessos();
+  }).catch(function () {
+    PERFIS_NUVEM.carregando = false;
+    PERFIS_NUVEM.erro = "Sem resposta do servidor.";
+    pintarAcessos();
+  });
+}
+
+function f6_alternarAcessoNuvem(uid, ativo) {
+  rpcConsole("console_alternar_acesso", { alvo: uid, p_ativo: !!ativo }).then(function (r) {
+    var m = f6_erro(r, "Nao foi possivel mudar a situacao");
+    if (m) { toast(m, "err"); return; }
+    carregarPerfisNuvem();
+    toast(ativo ? "Acesso liberado." : "Acesso suspenso - vale imediatamente.", "ok");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+}
+
+function f6_modalVincularAcesso(uid) {
+  var p = uid ? PERFIS_NUVEM.lista.filter(function (x) { return x.user_id === uid; })[0] : null;
+  var empresas = srt(DB.tenants.filter(function (t) { return t.id !== "vyoha"; }), function (t) { return t.nome; });
+  modal(p ? "Acesso de " + esc(p.nome) : "Criar um acesso",
+    (p ? "" : nota("O servidor cria a conta e gera a <b>senha temporaria</b>, que aparece uma unica vez " +
+                   "na tela seguinte. Voce nao escolhe senha, e nao precisa abrir o painel do Supabase.", "wr")) +
+    '<div class="rw rw2"><div class="fld"><label>E-mail <span class="rq">*</span></label>' +
+      '<input id="ac-mail" value="' + esc(p ? p.email : "") + '"' + (p ? " disabled" : "") + "></div>" +
+    '<div class="fld"><label>Nome <span class="rq">*</span></label>' +
+      '<input id="ac-nome" value="' + esc(p ? p.nome : "") + '"></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>Empresa <span class="rq">*</span></label>' +
+      '<select id="ac-tenant"><option value="vyoha"' + (p && p.tenant_id === "vyoha" ? " selected" : "") + ">Vyoha (equipe interna)</option>" +
+      empresas.map(function (t) {
+        return '<option value="' + esc(t.id) + '"' + (p && p.tenant_id === t.id ? " selected" : "") + ">" + esc(t.nome) + "</option>";
+      }).join("") + "</select></div>" +
+    '<div class="fld"><label>Papel <span class="rq">*</span></label><select id="ac-papel">' +
+      PAPEIS_NUVEM.map(function (x) {
+        return '<option value="' + x[0] + '"' + (p && p.perfil === x[0] ? " selected" : "") + ">" + x[1] + "</option>";
+      }).join("") + "</select></div></div>" +
+    '<div class="hp">' + PAPEIS_NUVEM.map(function (x) { return "<b>" + x[1] + ":</b> " + x[2]; }).join("<br>") + "</div>" +
+    '<div id="ac-err" class="note ng hidden"></div>',
+    '<button class="btn" onclick="fecharModal()">Cancelar</button>' +
+    '<button class="btn btn-p" onclick="salvarAcessoNuvem(' + (p ? "'" + esc(p.user_id) + "'" : "null") + ')">Salvar</button>');
+}
+
+function f6_salvarAcessoNuvem(uid) {
+  var err = el("ac-err");
+  function bad(m) {
+    if (err) { err.innerHTML = "<span>" + (typeof ICON === "object" && ICON.alert ? ICON.alert : "") + "</span><div>" + m + "</div>"; err.classList.remove("hidden"); }
+  }
+  var nome = v("ac-nome"), tenant = v("ac-tenant"), papel = v("ac-papel");
+  if (String(nome).length < 2) { bad("Informe o nome da pessoa."); return; }
+  if (!tenant) { bad("Escolha a empresa."); return; }
+
+  if (uid) {
+    rpcConsole("console_salvar_acesso", { alvo: uid, p_dados: { nome: nome, tenant_id: tenant, perfil: papel } })
+      .then(function (r) {
+        var m = f6_erro(r, "O servidor recusou a alteracao");
+        if (m) { bad(m); return; }
+        fecharModal(); carregarPerfisNuvem(); toast("Acesso atualizado.", "ok");
+      }).catch(function () { bad("Sem resposta do servidor."); });
+    return;
+  }
+
+  var mail = String(v("ac-mail")).trim().toLowerCase();
+  if (mail.indexOf("@") < 0) { bad("Informe o e-mail da pessoa."); return; }
+  rpcConsole("console_criar_acesso", { p_email: mail, p_nome: nome, p_tenant: tenant, p_perfil: papel })
+    .then(function (r) {
+      var m = f6_erro(r, "O servidor recusou a criacao");
+      if (m) { bad(m); return; }
+      var c = r.corpo || {};
+      F6_ENTREGA[mail] = { email: mail, nome: nome, senha: c.senha_temporaria || null, tenant_id: tenant };
+      fecharModal(); carregarPerfisNuvem();
+      f6_modalEntregaPessoa(mail);
+    }).catch(function () { bad("Sem resposta do servidor."); });
+}
+
+function f6_modalEntregaPessoa(chave) {
+  var d = F6_ENTREGA[chave] || {};
+  var t = d.tenant_id && d.tenant_id !== "vyoha" ? find(DB.tenants, d.tenant_id) : null;
+  modal("Acesso de " + esc(d.nome || d.email || ""),
+    nota("Esta senha foi criada pelo servidor e <b>aparece uma unica vez</b>. Ela nao fica guardada " +
+         "em lugar nenhum. Envie por canal privado.", "wr") +
+    ln("Endereco", d.tenant_id === "vyoha" ? "console.vyoha.com.br" : "app.vyoha.com.br") +
+    (t ? ln("Token da empresa", t.token || "-") : "") +
+    ln("E-mail", d.email || "-") +
+    ln("Senha temporaria", d.senha || "o acesso ja existia - use Redefinir senha") +
+    '<div class="sm mut" style="margin-top:12px">No primeiro acesso o sistema obriga a troca da senha.</div>',
+    '<button class="btn" onclick="fecharModal()">Fechar</button>' +
+    '<button class="btn btn-p" onclick="f6_copiarPessoa(\'' + esc(chave) + '\')">Copiar dados</button>');
+}
+
+function f6_copiarPessoa(chave) {
+  var d = F6_ENTREGA[chave] || {};
+  var t = d.tenant_id && d.tenant_id !== "vyoha" ? find(DB.tenants, d.tenant_id) : null;
+  copiar("Acesso Vyoha - " + (d.nome || "") +
+         "\nEndereco: " + (d.tenant_id === "vyoha" ? "console.vyoha.com.br" : "app.vyoha.com.br") +
+         (t ? "\nToken: " + (t.token || "") : "") +
+         "\nE-mail: " + (d.email || "") +
+         "\nSenha temporaria: " + (d.senha || "(gere uma nova)") +
+         "\nNo primeiro acesso o sistema pede a troca da senha.");
+  auditar("Dados de acesso copiados", d.nome || d.email, "entrega");
+}
+
+function f6_alvoNoServidor(u) {
+  if (!u) return null;
+  if (u.user_id) return u.user_id;
+  var p = (PERFIS_NUVEM.lista || []).filter(function (x) {
+    return String(x.email).toLowerCase() === String(u.email).toLowerCase();
+  })[0];
+  return p ? p.user_id : null;
+}
+
+function f6_modalSenha(uid2) {
+  var u = find(DB.users, uid2) ||
+          (PERFIS_NUVEM.lista || []).filter(function (x) { return x.user_id === uid2; })[0];
+  if (!u) { toast("Pessoa nao encontrada.", "err"); return; }
+  var alvo = f6_alvoNoServidor(u);
+  modal("Redefinir senha de " + esc(u.nome || u.email),
+    nota("A senha que a pessoa definiu <b>nao pode ser recuperada</b> - nem por voce, nem pelo servidor. " +
+         "O que da para fazer e pedir uma nova senha temporaria, gerada pelo servidor. Ela aparece " +
+         "uma unica vez e a pessoa troca no proximo acesso.", "wr") +
+    ln("Pessoa", u.nome || "-") + ln("E-mail", u.email || "-") +
+    ln("Empresa", u.tenant_id === "vyoha" ? "Vyoha" : nomeEmpresa(u.tenant_id)) +
+    (alvo ? "" : nota("Esta pessoa ainda nao tem acesso no servidor. Crie o acesso em vez de redefinir.", "ng")),
+    '<button class="btn" onclick="fecharModal()">Cancelar</button>' +
+    (alvo ? '<button class="btn btn-p" onclick="resetarSenha(\'' + esc(uid2) + '\')">Gerar nova senha</button>' : ""));
+}
+
+function f6_resetarSenha(uid2) {
+  var u = find(DB.users, uid2) ||
+          (PERFIS_NUVEM.lista || []).filter(function (x) { return x.user_id === uid2; })[0];
+  var alvo = f6_alvoNoServidor(u);
+  if (!alvo) { toast("Esta pessoa nao tem acesso no servidor.", "err"); return; }
+  rpcConsole("console_redefinir_senha", { alvo: alvo }).then(function (r) {
+    var m = f6_erro(r, "O servidor recusou a redefinicao");
+    if (m) { toast(m, "err"); return; }
+    var c = r.corpo || {};
+    var chave = String(u.email || c.email || alvo).toLowerCase();
+    F6_ENTREGA[chave] = { email: c.email || u.email, nome: u.nome, senha: c.senha_temporaria, tenant_id: u.tenant_id };
+    if (u && u.id) { u.trocar_senha = true; delete u.provisoria; save(); }
+    fecharModal();
+    f6_modalEntregaPessoa(chave);
+    carregarPerfisNuvem();
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+}
+
+function f6_modalCredencialUsuario(uid2) {
+  var u = find(DB.users, uid2) ||
+          (PERFIS_NUVEM.lista || []).filter(function (x) { return x.user_id === uid2; })[0];
+  if (!u) { toast("Pessoa nao encontrada.", "err"); return; }
+  var chave = String(u.email || "").toLowerCase();
+  if (F6_ENTREGA[chave] && F6_ENTREGA[chave].senha) { f6_modalEntregaPessoa(chave); return; }
+  f6_modalSenha(uid2);
+}
+
+function f6_salvarConta() {
+  var u = me();
+  var nome = v("mc-nome"), mail = String(v("mc-mail")).toLowerCase(), s2 = v("mc-senha");
+  if (String(nome).length < 2) { toast("Informe o nome.", "err"); return; }
+  if (mail.indexOf("@") < 0) { toast("Informe um e-mail valido.", "err"); return; }
+  var antes = u.email;
+  u.nome = nome;
+  if (antes !== mail) auditar("E-mail do console alterado", nome, "", null, antes, mail);
+
+  function fim() { save(); montarUsuario(); fecharModal(); toast("Acesso atualizado.", "ok"); }
+
+  if (!s2 && antes === mail) { fim(); return; }
+
+  var msg = s2 ? senhaFraca(s2, nome, mail) : null;
+  if (msg) { toast(msg, "err"); return; }
+
+  var c = supaCfg();
+  var corpo = {};
+  if (s2) corpo.password = s2;
+  if (antes !== mail) corpo.email = mail;
+
+  fetch(c.url + "/auth/v1/user", {
+    method: "PUT",
+    headers: { apikey: c.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify(corpo)
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (x) {
+      if (!x.ok) {
+        var m = (x.j && (x.j.msg || x.j.message || x.j.error_description)) || "";
+        if (/different from the old password/i.test(m)) m = "Escolha uma senha diferente da que voce usa agora.";
+        toast(m || "O servidor nao aceitou a alteracao.", "err");
+        return;
+      }
+      if (s2) { u.trocar_senha = false; auditar("Alterou a propria senha", u.nome); rpcConsole("senha_definida").catch(function () {}); }
+      if (antes !== mail) u.email = mail;
+      fim();
+    }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+}
+
+function f6_modalEntregaLote(lista) {
+  modal("Senhas temporarias criadas",
+    nota("Estas senhas aparecem <b>uma unica vez</b>. Copie agora e entregue por canal privado.", "wr") +
+    lista.map(function (x) {
+      return ln(esc(x.nome || x.email) + " - " + esc(x.empresa), esc(x.email) + " - " + esc(x.senha));
+    }).join(""),
+    '<button class="btn btn-p" onclick="fecharModal()">Fechar</button>');
+}
+
+function f6_criarAcessosQueFaltam() {
+  var vinculados = {};
+  (PERFIS_NUVEM.lista || []).forEach(function (p) { vinculados[String(p.email || "").toLowerCase()] = true; });
+  var faltando = [];
+  DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; }).forEach(function (t) {
+    DB.users.filter(function (u) { return u.tenant_id === t.id; }).forEach(function (u) {
+      if (u.email && !vinculados[String(u.email).toLowerCase()]) faltando.push({ u: u, t: t });
+    });
+  });
+  if (!faltando.length) { toast("Todos os acessos ja existem no servidor.", "ok"); return; }
+
+  var feitos = 0, i = 0, criadas = [];
+  (function proximo() {
+    if (i >= faltando.length) {
+      carregarPerfisNuvem();
+      toast(feitos + " de " + faltando.length + " acesso(s) criados.", feitos ? "ok" : "err");
+      if (criadas.length) f6_modalEntregaLote(criadas);
+      return;
+    }
+    var x = faltando[i++];
+    var papel = x.u.perfil === "holding" ? "holding" : x.u.perfil === "admin" ? "admin" : "vendedor";
+    rpcConsole("console_criar_acesso", {
+      p_email: String(x.u.email).toLowerCase(), p_nome: x.u.nome || x.u.email,
+      p_tenant: x.t.id, p_perfil: papel
+    }).then(function (r) {
+      var c = (r && r.corpo) || {};
+      if (c.senha_temporaria) {
+        feitos++;
+        criadas.push({ email: x.u.email, nome: x.u.nome, senha: c.senha_temporaria, empresa: x.t.nome });
+      }
+      proximo();
+    }).catch(proximo);
+  })();
+}
+
+protegerSenha = function () {};
+conferirSenha = function () { return false; };
+senhaProvisoria = function () { return ""; };
+migrarSenhas = function () {};
+criarAcesso = function () { return null; };
+criarAcessosQueFaltam = f6_criarAcessosQueFaltam;
+
+carregarPerfisNuvem = f6_carregarPerfisNuvem;
+alternarAcessoNuvem = f6_alternarAcessoNuvem;
+modalVincularAcesso = f6_modalVincularAcesso;
+salvarAcessoNuvem = f6_salvarAcessoNuvem;
+modalSenha = f6_modalSenha;
+resetarSenha = f6_resetarSenha;
+modalCredencialUsuario = f6_modalCredencialUsuario;
+salvarConta = f6_salvarConta;
+
+window.carregarPerfisNuvem = carregarPerfisNuvem;
+window.alternarAcessoNuvem = alternarAcessoNuvem;
+window.modalVincularAcesso = modalVincularAcesso;
+window.salvarAcessoNuvem = salvarAcessoNuvem;
+window.modalSenha = modalSenha;
+window.resetarSenha = resetarSenha;
+window.modalCredencialUsuario = modalCredencialUsuario;
+window.salvarConta = salvarConta;
+window.criarAcessosQueFaltam = criarAcessosQueFaltam;
+window.protegerSenha = protegerSenha;
+window.conferirSenha = conferirSenha;
+window.senhaProvisoria = senhaProvisoria;
+window.migrarSenhas = migrarSenhas;
+window.criarAcesso = criarAcesso;
+window.f6_copiarPessoa = f6_copiarPessoa;
+window.f6_modalEntregaPessoa = f6_modalEntregaPessoa;
+
+try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
+
 </script>
 </body>
 </html>
