@@ -5575,5 +5575,152 @@ try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
 })();
 
 </script>
+<script>
+/* ===============================================================
+   VYOHA CONSOLE · FASE 17 · A TELA EMPRESAS VOLTA A ABRIR
+
+   SINTOMA (visto ao vivo em console.vyoha.com.br)
+
+     Empresas > "Erro ao montar a tela
+     Cannot read properties of undefined (reading 'filter')"
+
+   CAUSA (medida, nao deduzida)
+
+   Rodei cada funcao da tela isoladamente, empresa por empresa:
+
+     Pilar Credmoveis tmsb5rsft64ds  cardEmpresa ok
+     Pilar Credmoveis tmsf5ettc53hx  cardEmpresa ok
+     Pilar Credmoveis tmsf6ons427kx  cardEmpresa ERRO
+     TESTE VYOHA      tca3b30cba4f7  cardEmpresa ok
+
+   O registro de implantacao de tmsf6ons427kx e este:
+
+     { obs:"", etapa:"implantacao", inicio:"2026-08-04",
+       responsavel:null, id:"immsf6ons4431k",
+       tenant_id:"tmsf6ons427kx",
+       criado_em:"2026-08-18T22:54:29Z", ... }
+
+   Nao tem `checklist`. E `progImplantacao` faz
+   `im.checklist.filter(...)` sem conferir. Uma empresa derruba
+   a tela inteira.
+
+   O `criado_em` mostra de onde ele veio: da tabela do servidor,
+   por `console_listar`, e nao de `novaImplantacao()` — essa
+   sempre monta o checklist. Ou seja: o registro nasceu no
+   servidor sem os campos que a tela assume existir, e
+   `f4_sincronizar` reescreve DB.implantacoes a cada login. Um
+   conserto so no navegador voltaria a quebrar no proximo acesso.
+
+   NAO E EFEITO DA CAMADA 13. A camada 13 apaga campo de senha,
+   troca `copiarAcesso` e `impersonar` e ajusta `url_sistema` —
+   nao toca em implantacao, colecao nem tela. Todas as colecoes
+   do Console foram conferidas e existem (tenants 5, users 5,
+   faturas 2, implantacoes 2, contratos 2, sessoes 12, o resto
+   vazio porem presente). O defeito e anterior.
+
+   O QUE ESTA CAMADA FAZ
+
+   1 · `progImplantacao` passa a aceitar registro sem checklist
+       (vale 0%), em vez de derrubar a tela.
+   2 · Normaliza DB.implantacoes: registro sem `checklist` ganha
+       o checklist padrao; sem `historico` ganha lista vazia.
+       As telas de detalhe leem `im.checklist` direto, entao a
+       correcao precisa estar no dado, nao so no calculo.
+   3 · Repete a normalizacao depois de cada `sincronizarRede`,
+       que e quem traz os registros do servidor por cima.
+
+   Nao reescreve tela, nao muda regra, nao mexe em servidor.
+   =============================================================== */
+(function () {
+
+  var F17 = { normalizados: [], quando: [] };
+
+  /* itens que o proprio Console ja considera cumpridos quando o
+     ambiente existe: contrato, pagamento e ambiente/token.
+     E a mesma regra que a tela usa ao provisionar. Nada alem
+     disso e marcado — o resto a Vyoha marca a mao. */
+  function f17_checklistDe(im) {
+    var base = (typeof CHECKLIST_PADRAO !== "undefined" && CHECKLIST_PADRAO.length)
+      ? CHECKLIST_PADRAO
+      : ["Contrato assinado e arquivado", "Pagamento inicial confirmado", "Ambiente criado e token gerado"];
+
+    var t = null;
+    try { t = find(DB.tenants, im.tenant_id); } catch (e) {}
+    var provisionado = !!(t && (t.provisionado || t.token));
+    var concluida = im.etapa === "ativa";
+
+    return base.map(function (x, i) {
+      var ok = concluida || (provisionado && i < 3);
+      return { t: x, ok: !!ok };
+    });
+  }
+
+  function f17_normalizar(motivo) {
+    var mexeu = [];
+    try {
+      if (!Array.isArray(DB.implantacoes)) { DB.implantacoes = []; }
+      DB.implantacoes.forEach(function (im) {
+        if (!im) { return; }
+        if (!Array.isArray(im.checklist)) {
+          im.checklist = f17_checklistDe(im);
+          mexeu.push("checklist:" + (im.tenant_id || im.id || "?"));
+        }
+        if (!Array.isArray(im.historico)) {
+          im.historico = im.etapa ? [{ etapa: im.etapa, data: im.inicio || im.aberta || null, user_id: null }] : [];
+          mexeu.push("historico:" + (im.tenant_id || im.id || "?"));
+        }
+      });
+      if (mexeu.length) {
+        F17.normalizados = F17.normalizados.concat(mexeu);
+        F17.quando.push(motivo);
+        try { save(); } catch (e) {}
+      }
+    } catch (e) { F17.erro = String(e && e.message); }
+    return mexeu;
+  }
+
+  /* 1 · o calculo para de confiar cegamente no dado */
+  try {
+    if (typeof progImplantacao === "function") {
+      progImplantacao = function (im) {
+        var l = (im && Array.isArray(im.checklist)) ? im.checklist : [];
+        if (!l.length) { return 0; }
+        var f = l.filter(function (c) { return c && c.ok; }).length;
+        return Math.round(f / l.length * 100);
+      };
+      window.progImplantacao = progImplantacao;
+    }
+  } catch (e) {}
+
+  /* 2 · o dado que ja esta na memoria */
+  f17_normalizar("carga");
+
+  /* 3 · e o dado que o servidor mandar depois */
+  try {
+    if (typeof sincronizarRede === "function") {
+      var sincAntigo = sincronizarRede;
+      var novo = function (depois) {
+        return sincAntigo(function (ok) {
+          f17_normalizar("sincronizacao");
+          if (depois) { depois(ok); }
+        });
+      };
+      sincronizarRede = novo;
+      window.sincronizarRede = novo;
+    }
+  } catch (e) {}
+
+  /* 4 · a prova: a tela monta? */
+  try {
+    try { pg_empresas(); F17.pg_empresas = "ok"; }
+    catch (e) { F17.pg_empresas = "ERRO: " + String(e && e.message); }
+    window.F17 = F17;
+    document.documentElement.setAttribute("data-f17",
+      F17.pg_empresas === "ok"
+        ? (F17.normalizados.length ? "corrigiu:" + F17.normalizados.length : "ja-ok")
+        : "ainda-quebrada");
+  } catch (e) {}
+})();
+</script>
 </body>
 </html>
