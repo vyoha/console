@@ -5431,5 +5431,149 @@ window.f6_modalEntregaPessoa = f6_modalEntregaPessoa;
 try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
 
 </script>
+
+<script>
+
+/* ===============================================================
+   VYOHA CONSOLE · FASE 13 · O QUE SOBROU DO MECANISMO ANTIGO
+
+   A auditoria varreu o Console procurando senha em texto claro e
+   caminho legado ainda alcancavel. Achou tres coisas.
+
+   1 · SENHA TEMPORARIA GUARDADA NO NAVEGADOR
+
+   Antes da fase 4, o Console guardava a senha temporaria do
+   administrador em `t.senha_provisoria`, dentro do banco local.
+   Tudo que ESCREVIA esse campo ja esta desligado. Mas duas
+   telas ainda LEEM:
+
+     emp_licenca   mostra a senha na ficha da empresa
+     copiarAcesso  copia a senha para a area de transferencia
+
+   Com dado antigo no navegador, o Console mostra uma senha que
+   nao vale mais — porque desde a fase 4 quem gera e o servidor.
+   Entregar essa senha ao cliente e entregar uma senha morta.
+
+   2 · ENTRAR COMO CLIENTE, QUE NAO ENTRA MAIS
+
+   `impersonar` preparava uma sessao escrevendo no localStorage e
+   mandava abrir o System. O System de hoje autentica no servidor
+   e ignora essa chave. O botao nao avisa nada: prepara o que
+   ninguem le, abre a outra aba e a pessoa cai na tela de acesso.
+
+   3 · ENDERECO DO SISTEMA APONTANDO PARA UM ARQUIVO
+
+   `url_sistema` nasce como "vyoha-sistema-gestao.html", que era
+   o nome do arquivo quando tudo rodava de uma pasta. Hoje o
+   System mora em app.vyoha.com.br.
+
+   Esta camada nao reescreve tela nenhuma. So tira o que mente.
+   =============================================================== */
+(function () {
+
+  /* ------------------------------------------------------------
+     1 · a senha sai do navegador, e nao volta
+     ------------------------------------------------------------ */
+  function f13_limpar() {
+    var mexeu = 0;
+    try {
+      (DB.tenants || []).forEach(function (t) {
+        if (t && t.senha_provisoria != null) { delete t.senha_provisoria; mexeu++; }
+      });
+      (DB.users || []).forEach(function (u) {
+        if (u && u.provisoria != null) { delete u.provisoria; mexeu++; }
+        if (u && u.senha != null)      { delete u.senha;      mexeu++; }
+        if (u && u.senha_hash != null) { delete u.senha_hash; mexeu++; }
+        if (u && u.salt != null)       { delete u.salt;       mexeu++; }
+      });
+      if (mexeu) { save(); }
+    } catch (e) {}
+    return mexeu;
+  }
+
+  /* de novo a cada gravacao: dado velho pode voltar de um backup
+     restaurado ou de outra aba */
+  if (typeof save === "function") {
+    var saveAntigo = save;
+    var limpando = false;
+    save = function () {
+      var r = saveAntigo.apply(this, arguments);
+      if (!limpando) {
+        limpando = true;
+        try {
+          var achou = false;
+          (DB.tenants || []).forEach(function (t) { if (t && t.senha_provisoria != null) { delete t.senha_provisoria; achou = true; } });
+          (DB.users || []).forEach(function (u) { if (u && u.provisoria != null) { delete u.provisoria; achou = true; } });
+          if (achou) { saveAntigo.apply(this, arguments); }
+        } catch (e) {}
+        limpando = false;
+      }
+      return r;
+    };
+    try { window.save = save; } catch (e) {}
+  }
+
+  /* copiar o acesso: token e e-mail sim, senha nunca */
+  copiarAcesso = function (id) {
+    var t = find(DB.tenants, id) || {};
+    var adm = (DB.users || []).filter(function (u) {
+      return u.tenant_id === id && u.perfil === "admin";
+    })[0];
+    copiar(
+      "Acesso Vyoha - " + (t.nome || "") + "\n" +
+      "Endereco: https://app.vyoha.com.br\n" +
+      "Token: " + (t.token || "-") + "\n" +
+      "E-mail: " + ((adm && adm.email) || t.email || "-") + "\n" +
+      "Senha temporaria: entregue no momento em que e gerada, uma unica vez.\n" +
+      "No primeiro acesso o sistema pede a troca da senha.");
+    try { auditar("Dados de acesso copiados", t.nome, "sem senha", t.id); } catch (e) {}
+  };
+  try { window.copiarAcesso = copiarAcesso; } catch (e) {}
+
+
+  /* ------------------------------------------------------------
+     2 · entrar como cliente para de fingir
+
+     Nao estou construindo um mecanismo novo aqui: so estou
+     impedindo que o botao diga que deu certo quando nao deu.
+     O caminho que funciona hoje esta escrito no aviso.
+     ------------------------------------------------------------ */
+  impersonar = function () {
+    try { fecharModal(); } catch (e) {}
+    try {
+      modal("Entrar como cliente nao esta disponivel",
+        nota("Este caminho preparava a sessao dentro do navegador. O Vyoha System passou a " +
+             "autenticar no servidor e nao le mais essa preparacao — o botao abria o sistema " +
+             "e a pessoa caia na tela de acesso, sem aviso nenhum.", "wr") +
+        "<p style='line-height:1.65;margin-top:12px'>Para entrar no ambiente de um cliente hoje: " +
+        "<b>Acessos &rsaquo; Redefinir senha</b> do administrador dele. A senha temporaria aparece " +
+        "uma vez, o acesso fica registrado na auditoria e o cliente troca no proximo login.</p>",
+        '<button class="btn btn-p" onclick="fecharModal()">Entendi</button>');
+    } catch (e) {
+      try { toast("Entrar como cliente nao esta disponivel. Use Acessos > Redefinir senha.", "err"); } catch (x) {}
+    }
+  };
+  try { window.impersonar = impersonar; } catch (e) {}
+
+
+  /* ------------------------------------------------------------
+     3 · o endereco do System
+     ------------------------------------------------------------ */
+  try {
+    DB.global = DB.global || {};
+    if (!DB.global.url_sistema || DB.global.url_sistema.indexOf(".html") >= 0) {
+      DB.global.url_sistema = "https://app.vyoha.com.br";
+      save();
+    }
+  } catch (e) {}
+
+
+  var quantos = f13_limpar();
+  try {
+    document.documentElement.setAttribute("data-f13", quantos ? ("limpou-" + quantos) : "limpa");
+  } catch (e) {}
+})();
+
+</script>
 </body>
 </html>
