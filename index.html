@@ -1884,10 +1884,15 @@ function emp_empresa(t) {
 }
 function salvarObs(id) {
   var t = find(DB.tenants, id);
-  t.obs = el("e-obs").value;
-  t.tags = v("e-tags").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
-  auditar("Observações internas atualizadas", t.nome, "", t.id);
-  save(); toast("Observações salvas.", "ok"); verEmpresa(id, "empresa");
+  if (!t) return toast("Empresa não encontrada.", "err");
+  var dados = { obs: v("e-obs"), tags: v("e-tags").split(",").map(function (x) { return x.trim(); }).filter(Boolean) };
+  rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: dados }).then(function (r) {
+    var m = f5_erro(r, "O servidor recusou a alteração");
+    if (m) return toast(m, "err");
+    t.obs = dados.obs; t.tags = dados.tags;
+    auditar("Observações internas atualizadas", t.nome, "", t.id);
+    save(); toast("Observações salvas no servidor.", "ok"); verEmpresa(id, "empresa");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function emp_contrato(t) {
   var c = contratoDe(t.id);
@@ -1911,11 +1916,19 @@ function emp_contrato(t) {
 }
 function assinarContrato(id) {
   var t = find(DB.tenants, id), c = contratoDe(id);
+  if (!t || !c) return toast("Contrato não encontrado.", "err");
   confirmar("Registrar assinatura", "Confirma que o contrato de " + t.nome + " foi assinado?", function () {
-    c.status = "assinado"; c.assinado = today();
-    if (t.situacao === "negociacao" || t.situacao === "contrato_enviado") t.situacao = "contrato_assinado";
-    auditar("Contrato assinado", t.nome, "v" + c.versao, t.id);
-    save(); toast("Assinatura registrada.", "ok"); verEmpresa(id, "contrato");
+    var novo = Object.assign({}, c, { status: "assinado", assinado: today() });
+    var dados = Object.assign({}, novo, { id: c.id, tenant_id: id });
+    rpcConsole("console_salvar", { colecao: "contratos", registro: dados }).then(function (r) {
+      var m = f5_erro(r, "O servidor recusou a assinatura");
+      if (m) return toast(m, "err");
+      c.status = novo.status; c.assinado = novo.assinado;
+      if (t.situacao === "negociacao" || t.situacao === "contrato_enviado") t.situacao = "contrato_assinado";
+      rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: { situacao: t.situacao } });
+      auditar("Contrato assinado", t.nome, "v" + c.versao, t.id);
+      save(); toast("Assinatura registrada no servidor.", "ok"); verEmpresa(id, "contrato");
+    }).catch(function () { toast("Sem resposta do servidor.", "err"); });
   }, "Confirmar");
 }
 function modalAditivo(id) {
@@ -1926,11 +1939,17 @@ function modalAditivo(id) {
 }
 function salvarAditivo(id) {
   var d = v("ad-desc"); if (!d) return toast("Descreva o aditivo.", "err");
-  var c = contratoDe(id);
-  c.aditivos = c.aditivos || [];
-  c.aditivos.push({ data: v("ad-data") || today(), desc: d, por: me().nome });
-  auditar("Aditivo registrado", nomeEmpresa(id), d, id);
-  save(); fecharModal(); toast("Aditivo registrado.", "ok"); verEmpresa(id, "contrato");
+  var c = contratoDe(id); if (!c) return toast("Contrato não encontrado.", "err");
+  var aditivos = (c.aditivos || []).slice();
+  aditivos.push({ data: v("ad-data") || today(), desc: d, por: (me() || {}).nome || "Vyoha" });
+  var dados = Object.assign({}, c, { aditivos: aditivos, id: c.id, tenant_id: id });
+  rpcConsole("console_salvar", { colecao: "contratos", registro: dados }).then(function (r) {
+    var m = f5_erro(r, "O servidor recusou o aditivo");
+    if (m) return toast(m, "err");
+    c.aditivos = aditivos;
+    auditar("Aditivo registrado", nomeEmpresa(id), d, id);
+    save(); fecharModal(); toast("Aditivo registrado no servidor.", "ok"); verEmpresa(id, "contrato");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function emp_licenca(t) {
   var u = usoLicenca(t), lim = limites(t);
@@ -1988,10 +2007,20 @@ function modalTrocarToken(id) {
     '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-d" onclick="trocarTokenEmpresa(\'' + id + '\')">Renovar token</button>');
 }
 function trocarTokenEmpresa(id) {
-  var t = find(DB.tenants, id), antigo = t.token, motivo = v("tk-motivo");
-  var novo = renovarToken(t, motivo, me().nome);
-  auditar("Token renovado", t.nome, motivo, t.id, antigo, novo);
-  save(); fecharModal(); toast("Token novo: " + novo, "ok"); verEmpresa(id, "licenca");
+  var t = find(DB.tenants, id), motivo = v("tk-motivo");
+  if (!t) return toast("Empresa não encontrada.", "err");
+  rpcConsole("console_renovar_token", { p_tenant: id, p_motivo: motivo || "Renovação programada" }).then(function (r) {
+    var m = f5_erro(r, "O servidor recusou a renovação");
+    if (m) return toast(m, "err");
+    var c = r.corpo || {};
+    t.token = c.token || t.token;
+    if (c.token_anterior) t.token_anterior = c.token_anterior;
+    if (c.token_graca_ate) t.token_graca_ate = c.token_graca_ate;
+    if (c.token_validade) t.token_validade = c.token_validade;
+    t.token_trocado_em = today();
+    auditar("Token renovado", t.nome, motivo, t.id, c.token_anterior || "", t.token || "");
+    save(); fecharModal(); toast("Token renovado no servidor.", "ok"); verEmpresa(id, "licenca");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function emp_modulos(t) {
   var mods = modulosDaEmpresa(t);
@@ -2005,15 +2034,21 @@ function emp_modulos(t) {
   }).join("") + "</div></div>", "", "combinação exclusiva desta empresa");
 }
 function alternarModulo(tid, k) {
-  var t = find(DB.tenants, tid), mods = modulosDaEmpresa(t).slice();
-  var i = mods.indexOf(k);
+  var t = find(DB.tenants, tid);
+  if (!t) return toast("Empresa não encontrada.", "err");
+  var mods = modulosDaEmpresa(t).slice(), i = mods.indexOf(k);
   if (i >= 0) mods.splice(i, 1); else mods.push(k);
-  t.licenca.modulos = mods;
-  /* guarda quando o Growth entrou: é o marco do comparativo antes x depois */
-  if (k === "growth") { if (i >= 0) delete t.growth_desde; else if (!t.growth_desde) t.growth_desde = today(); }
-  auditar(i >= 0 ? "Módulo removido" : "Módulo liberado", modNome(k), t.nome, t.id, i >= 0 ? "ativo" : "inativo", i >= 0 ? "inativo" : "ativo");
-  save(); toast(modNome(k) + (i >= 0 ? " removido." : " liberado."), "ok");
-  verEmpresa(tid, "modulos");
+  var dados = { licenca: Object.assign({}, t.licenca || {}, { modulos: mods }) };
+  if (k === "growth") dados.growth_desde = i >= 0 ? null : (t.growth_desde || today());
+  rpcConsole("console_atualizar_empresa", { p_tenant: tid, p_dados: dados }).then(function (r) {
+    var m = f5_erro(r, "O servidor recusou a alteração do módulo");
+    if (m) return toast(m, "err");
+    t.licenca = dados.licenca;
+    if (k === "growth") { if (i >= 0) delete t.growth_desde; else t.growth_desde = dados.growth_desde; }
+    auditar(i >= 0 ? "Módulo removido" : "Módulo liberado", modNome(k), t.nome, t.id, i >= 0 ? "ativo" : "inativo", i >= 0 ? "inativo" : "ativo");
+    save(); toast(modNome(k) + (i >= 0 ? " removido no servidor." : " liberado no servidor."), "ok");
+    verEmpresa(tid, "modulos");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function emp_financeiro(t) {
   var fs = srt(faturasDe(t.id), function (f) { return f.venc; }, true);
@@ -2445,17 +2480,27 @@ function modalSuspender(id) {
 }
 function suspender(id) {
   var t = find(DB.tenants, id), m = v("sp-motivo");
-  t.situacao = "suspensa"; t.status = "suspenso";
-  t.suspensao = { motivo: m, obs: v("sp-obs"), data: today(), user_id: Sess.user_id };
-  auditar("Empresa suspensa", t.nome, m + (v("sp-obs") ? " · " + v("sp-obs") : ""), t.id, "ativa", "suspensa");
-  save(); fecharModal(); toast(t.nome + " suspensa.", "ok"); verEmpresa(id, "empresa");
+  if (!t) return toast("Empresa não encontrada.", "err");
+  var susp = { motivo: m, obs: v("sp-obs"), data: today(), user_id: Sess ? Sess.user_id : null };
+  rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: { situacao: "suspensa", status: "suspenso", suspensao: susp, ativo: false } }).then(function (r) {
+    var e = f5_erro(r, "O servidor recusou a suspensão");
+    if (e) return toast(e, "err");
+    t.situacao = "suspensa"; t.status = "suspenso"; t.suspensao = susp;
+    auditar("Empresa suspensa", t.nome, m + (susp.obs ? " · " + susp.obs : ""), t.id, "ativa", "suspensa");
+    save(); fecharModal(); toast(t.nome + " suspensa no servidor.", "ok"); verEmpresa(id, "empresa");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function reativarEmpresa(id) {
   var t = find(DB.tenants, id);
+  if (!t) return toast("Empresa não encontrada.", "err");
   confirmar("Reativar acesso", "O login de " + t.nome + " volta a funcionar imediatamente.", function () {
-    t.situacao = "ativa"; t.status = "ativo"; t.suspensao = null;
-    auditar("Empresa reativada", t.nome, "", t.id, "suspensa", "ativa");
-    save(); toast("Acesso reativado.", "ok"); verEmpresa(id, "empresa");
+    rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: { situacao: "ativa", status: "ativo", suspensao: null, ativo: true } }).then(function (r) {
+      var e = f5_erro(r, "O servidor recusou a reativação");
+      if (e) return toast(e, "err");
+      t.situacao = "ativa"; t.status = "ativo"; t.suspensao = null;
+      auditar("Empresa reativada", t.nome, "", t.id, "suspensa", "ativa");
+      save(); toast("Acesso reativado no servidor.", "ok"); verEmpresa(id, "empresa");
+    }).catch(function () { toast("Sem resposta do servidor.", "err"); });
   }, "Reativar");
 }
 function modalPlanoEmpresa(id) {
@@ -2480,23 +2525,26 @@ function modalPlanoEmpresa(id) {
 }
 function salvarPlanoEmpresa(id) {
   var t = find(DB.tenants, id), u = usoLicenca(t);
+  if (!t || !t.licenca) return toast("Licença da empresa não encontrada.", "err");
   var novoAdm = Math.max(1, nv("pl-adm")), novoPdv = Math.max(0, nv("pl-pdv")), novoOp = Math.max(0, nv("pl-op"));
   if (novoAdm < u.admins.uso) return toast("A empresa já usa " + u.admins.uso + " administradores. Desative um antes de reduzir.", "err");
   if (novoPdv < u.pdvs.uso) return toast("A empresa já usa " + u.pdvs.uso + " PDVs. Desative um antes de reduzir.", "err");
-  var antes = limites(t).admins + " adm / " + limites(t).pdvs + " PDV · " + money(t.licenca.valor) + "/mês" +
-    (ehHolding(t) ? " · " + limiteEmpresas(t) + " empresas" : "");
+  var antes = limites(t).admins + " adm / " + limites(t).pdvs + " PDV · " + money(t.licenca.valor) + "/mês" + (ehHolding(t) ? " · " + limiteEmpresas(t) + " empresas" : "");
   var novoEmp = ehHolding(t) ? Math.max(1, nv("pl-emp") || limiteEmpresas(t)) : null;
-  if (novoEmp != null && novoEmp < daRede(t.id).length)
-    return toast("A rede já tem " + daRede(t.id).length + " empresas vinculadas. Desvincule uma antes de reduzir o limite.", "err");
-  t.licenca.limites = { admins: novoAdm, pdvs: novoPdv, operacionais: novoOp, armazenamento: Math.max(1, nv("pl-arm") || 5) };
-  if (novoEmp != null) t.licenca.limites.empresas = novoEmp;
-  t.licenca.extras = {};
-  t.licenca.valor_licenca = nv("pl-lic");
-  t.licenca.valor = nv("pl-valor");
-  t.licenca.dia_venc = Math.min(28, Math.max(1, nv("pl-dia") || 10));
-  var depois = novoAdm + " adm / " + novoPdv + " PDV · " + money(t.licenca.valor) + "/mês";
-  auditar("Valores e limites alterados", t.nome, "", t.id, antes, depois);
-  save(); fecharModal(); toast("Atualizado.", "ok"); verEmpresa(id, "licenca");
+  if (novoEmp != null && novoEmp < daRede(t.id).length) return toast("A rede já tem " + daRede(t.id).length + " empresas vinculadas. Desvincule uma antes de reduzir o limite.", "err");
+  var lic = Object.assign({}, t.licenca);
+  lic.limites = { admins: novoAdm, pdvs: novoPdv, operacionais: novoOp, armazenamento: Math.max(1, nv("pl-arm") || 5) };
+  if (novoEmp != null) lic.limites.empresas = novoEmp;
+  lic.extras = {};
+  lic.valor_licenca = nv("pl-lic"); lic.valor = nv("pl-valor"); lic.dia_venc = Math.min(28, Math.max(1, nv("pl-dia") || 10));
+  var depois = novoAdm + " adm / " + novoPdv + " PDV · " + money(lic.valor) + "/mês";
+  rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: { licenca: lic } }).then(function (r) {
+    var e = f5_erro(r, "O servidor recusou os valores e limites");
+    if (e) return toast(e, "err");
+    t.licenca = lic;
+    auditar("Valores e limites alterados", t.nome, "", t.id, antes, depois);
+    save(); fecharModal(); toast("Valores e limites atualizados no servidor.", "ok"); verEmpresa(id, "licenca");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function modalExcluirEmpresa(id) {
   var t = find(DB.tenants, id);
@@ -2818,9 +2866,15 @@ function marcarChecklist(tid, i) {
 }
 function salvarImplantacao(tid) {
   var im = implantacaoDe(tid);
-  im.obs = el("im-obs").value;
-  auditar("Observação de implantação", nomeEmpresa(tid), "", tid);
-  save(); toast("Observações salvas.", "ok");
+  if (!im) return toast("Implantação não encontrada.", "err");
+  var dados = Object.assign({}, im, { obs: v("im-obs"), id: im.id, tenant_id: tid });
+  rpcConsole("console_salvar", { colecao: "implantacoes", registro: dados }).then(function (r) {
+    var m = f5_erro(r, "O servidor recusou a alteração");
+    if (m) return toast(m, "err");
+    im.obs = dados.obs;
+    auditar("Observação de implantação", nomeEmpresa(tid), "", tid);
+    save(); toast("Observações salvas no servidor.", "ok");
+  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function emp_implantacao(t) {
   var im = implantacaoDe(t.id);
