@@ -340,7 +340,7 @@ tr.clik:hover td{background:#fafbfc}
     <h2>Console Vyoha</h2>
     <div class="sub">Ambiente interno da plataforma. Acesso exclusivo da Vyoha.</div>
     <form onsubmit="event.preventDefault();doLogin()">
-      <div class="fld"><label>E-mail corporativo</label><input id="cs-mail" autocomplete="username" placeholder="vyohabr@gmail.com"></div>
+      <div class="fld"><label>E-mail corporativo</label><input id="cs-mail" autocomplete="username" placeholder="equipe@vyoha.com.br"></div>
       <div class="fld"><label>Senha</label><input id="cs-pass" type="password" autocomplete="current-password" placeholder="••••••"></div>
       <div id="cs-err" class="note ng hidden"></div>
       <button class="btn btn-p btn-lg" style="width:100%" type="submit">Entrar no console</button>
@@ -1024,8 +1024,8 @@ function modNome(k) { for (var i = 0; i < MODULOS.length; i++) if (MODULOS[i].k 
 
 /* ---------- acesso: a Vyoha tem um único login, com poder total ---------- */
 function contaVyoha() {
-  var l = DB.users.filter(function (u) { return u.tenant_id === "vyoha"; });
-  return l.length ? l[0] : null;
+  /* O login Vyoha e exclusivamente Supabase Auth. Nenhuma credencial local e usada. */
+  return null;
 }
 
 /* ---------- menu ---------- */
@@ -1123,7 +1123,8 @@ function mrr(t) { return t.licenca && t.licenca.status !== "cancelada" ? Number(
 function ultimoAcesso(tid) {
   var us = DB.users.filter(function (u) { return u.tenant_id === tid && (u.ultimo_acesso || u.acesso); });
   if (!us.length) return null;
-  return srt(us, function (u) { return u.ultimo_acesso || u.acesso; }, true)[0].ultimo_acesso || srt(us, function (u) { return u.ultimo_acesso || u.acesso; }, true)[0].acesso;
+  us.sort(function (a,b) { return new Date(b.ultimo_acesso || b.acesso).getTime() - new Date(a.ultimo_acesso || a.acesso).getTime(); });
+  return us[0].ultimo_acesso || us[0].acesso;
 }
 function diasSemAcesso(tid) {
   var a = ultimoAcesso(tid); if (!a) return 999;
@@ -2111,7 +2112,7 @@ function emp_usuarios(t) {
     {
       h: "Último acesso", r: function (u) {
         var p = credencialPendente(u);
-        return u.acesso ? fdt(u.acesso)
+        return (u.ultimo_acesso || u.acesso) ? fdt(u.ultimo_acesso || u.acesso)
           : '<span class="tag t-wr">aguardando 1º acesso</span>' +
           (p ? '<div class="sm mut">senha temporária <b class="mono">' + esc(p) + "</b></div>" : "");
       }
@@ -2141,7 +2142,7 @@ function emp_auditoria(t) {
 function modalEmpresa(id, rede) {
   var t = id ? find(DB.tenants, id) : null;
   var hd = rede ? find(DB.tenants, rede) : null;
-  if (hd && vagasRede(hd).cheia) return toast("A rede " + hd.nome + " está no limite contratado. Amplie o limite na licença da holding.", "err");
+  if (!id && hd && vagasRede(hd).cheia) return toast("A rede " + hd.nome + " está no limite contratado. Amplie o limite na licença da holding.", "err");
   modal(t ? (ehHolding(t) ? "Editar rede" : "Editar empresa") : hd ? "Nova empresa · rede " + hd.nome : "Nova empresa",
     '<div class="rw rw2"><div class="fld"><label>Nome fantasia <span class="rq">*</span></label><input id="em-nome" value="' + esc(t ? t.nome : "") + '"></div>' +
     '<div class="fld"><label>Razão social</label><input id="em-razao" value="' + esc(t ? t.razao || "" : "") + '"></div></div>' +
@@ -2254,67 +2255,8 @@ function salvarRede() {
   verEmpresa(novo.id, "empresa");
 }
 function salvarEmpresa(id) {
-  var nome = v("em-nome"), mail = v("em-mail");
-  if (nome.length < 3) return toast("Informe o nome fantasia.", "err");
-  if (!id && mail.indexOf("@") < 0) return toast("Informe o e-mail do administrador.", "err");
-  var slug = (v("em-slug") || nome).toLowerCase().replace(/[^a-z0-9]/g, "").substring(0, 18);
-  var campos = {
-    razao: v("em-razao"), cnpj: v("em-cnpj"), ie: v("em-ie"), segmento: v("em-seg"), cidade: v("em-cid"),
-    uf: v("em-uf").toUpperCase(), funcionarios: v("em-func"), endereco: v("em-end"), tel: dig(v("em-tel")),
-    whats: dig(v("em-whats")), representante: v("em-rep"), email: mail, slug: slug
-  };
-  if (id) {
-    var t = find(DB.tenants, id), antes = t.nome, matAntes = t.matriz_id || null;
-    t.nome = nome;
-    for (var k in campos) if (campos.hasOwnProperty(k)) t[k] = campos[k];
-    var mat = el("em-matriz") ? v("em-matriz") || null : matAntes;
-    if (mat !== matAntes) {
-      if (mat) {
-        var alvo = find(DB.tenants, mat);
-        if (!ehHolding(alvo)) return toast("Só uma holding pode receber empresas.", "err");
-        if (vagasRede(alvo).cheia) return toast("A rede " + alvo.nome + " está no limite contratado.", "err");
-      }
-      t.matriz_id = mat;
-      auditar("Rede da empresa alterada", nome, mat ? "rede: " + nomeEmpresa(mat) : "empresa independente",
-        t.id, matAntes ? nomeEmpresa(matAntes) : "independente", mat ? nomeEmpresa(mat) : "independente");
-    }
-    auditar("Cadastro da empresa alterado", nome, "", t.id, antes, nome);
-    save(); fecharModal(); toast("Cadastro atualizado.", "ok"); verEmpresa(id, "empresa");
-    return;
-  }
-  var mnova = el("em-matriz") ? v("em-matriz") || null : null;
-  if (mnova) {
-    var hd2 = find(DB.tenants, mnova);
-    if (!ehHolding(hd2)) return toast("Só uma holding pode receber empresas.", "err");
-    if (vagasRede(hd2).cheia) return toast("A rede " + hd2.nome + " está no limite contratado.", "err");
-  }
-  var novo = {
-    id: uid("t"), nome: nome, tipo: "empresa", status: "ativo", situacao: "contrato_assinado", provisionado: false,
-    criada: today(), matriz_id: mnova, token: null, licenca: null, obs: "", tags: []
-  };
-  for (var k2 in campos) if (campos.hasOwnProperty(k2)) novo[k2] = campos[k2];
-  novo.licenca = {
-    tipo: "vitalicia", valor_licenca: nv("em-lic"), valor: nv("em-man"),
-    dia_venc: Math.min(28, Math.max(1, nv("em-dia") || 10)),
-    inicio: today(), pagamento_inicial: false, status: "pendente",
-    modulos: MODULOS_PADRAO.slice(), extras: {},
-    limites: {
-      admins: Math.max(1, nv("em-adm") || LIMITES_PADRAO.admins),
-      pdvs: Math.max(0, nv("em-pdv") || LIMITES_PADRAO.pdvs),
-      operacionais: Math.max(0, nv("em-op") || LIMITES_PADRAO.operacionais),
-      armazenamento: LIMITES_PADRAO.armazenamento
-    }
-  };
-  DB.tenants.push(novo);
-  DB.contratos.push({
-    id: uid("ct"), tenant_id: novo.id, versao: 1, status: "assinado", enviado: today(), assinado: today(),
-    arquivo: "contrato-" + slug + "-v1.pdf", aditivos: [], obs: ""
-  });
-  DB.implantacoes.push(novaImplantacao(novo, false));
-  auditar("Empresa cadastrada", nome, "licença " + money(novo.licenca.valor_licenca) + " · manutenção " + money(novo.licenca.valor), novo.id);
-  save(); fecharModal();
-  toast("Empresa cadastrada. Confirme o pagamento inicial para criar o ambiente.", "ok");
-  verEmpresa(novo.id, "empresa");
+  /* Edição/cadastro pelo Console Vyoha: a Vyoha não depende da holding. */
+  return f5_salvarEmpresa(id);
 }
 function confirmarPagamentoInicial(id) {
   var t = find(DB.tenants, id);
@@ -2420,7 +2362,7 @@ function modalSenha(uid2) {
     nota("A senha que o cliente definiu <b>não pode ser recuperada</b> — nem por você. O que dá para fazer é definir uma nova senha temporária, " +
       "que ele troca no próximo acesso. Tudo fica registrado na auditoria.", "wr") +
     ln("Usuário", u.nome) + ln("E-mail", u.email) + ln("Empresa", nomeEmpresa(u.tenant_id)) +
-    ln("Último acesso", u.acesso ? fdt(u.acesso) : "nunca acessou") +
+    ln("Último acesso", (u.ultimo_acesso || u.acesso) ? fdt(u.ultimo_acesso || u.acesso) : "nunca acessou") +
     '<div class="fld" style="margin-top:12px"><label>Nova senha temporária</label><input id="ps-temp" value="' + senhaProvisoria() + '">' +
     '<div class="hp">Você escolhe. Ela fica visível aqui no console até o cliente entrar.</div></div>' +
     '<label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-top:8px"><input type="checkbox" id="ps-trocar" checked> Exigir troca no próximo acesso</label>',
@@ -4643,7 +4585,10 @@ function f4_sincronizar(depois) {
         t.nome = e.nome;
         t.status = e.ativo ? "ativo" : "inativo";
         t.matriz_id = e.matriz_id || null;
-        t.email_admin = e.email_admin || "";
+        t.tipo = e.tipo || ((e.matriz_id == null && Number(e.acessos || 0) > 0 && /grupo|holding/i.test(String(e.nome || ""))) ? "holding" : (t.tipo || "empresa"));
+        t.email = e.email_admin || t.email || "";
+        t.email_admin = e.email_admin || t.email_admin || "";
+        t.ultimo_acesso = e.ultimo_acesso || null;
         t.indicadores = { acessos: e.acessos, ativos: e.ativos, vendas: e.vendas,
                           faturado: e.faturado, em_aberto: e.em_aberto };
       });
@@ -4954,11 +4899,6 @@ function f5_salvarEmpresa(id) {
   if (String(d.nome).length < 3) { toast("Informe o nome fantasia.", "err"); return; }
   if (!id && String(d.email).indexOf("@") < 0) { toast("Informe o e-mail do administrador.", "err"); return; }
   var matriz = el("em-matriz") ? (v("em-matriz") || null) : ((find(DB.tenants, id) || {}).matriz_id || null);
-  if (matriz) {
-    var hd = find(DB.tenants, matriz);
-    if (hd && !ehHolding(hd)) { toast("So uma holding pode receber empresas.", "err"); return; }
-    if (hd && vagasRede(hd).cheia) { toast("A rede " + hd.nome + " esta no limite contratado.", "err"); return; }
-  }
   d.matriz_id = matriz;
 
   var pedido = id
@@ -5121,6 +5061,7 @@ function f5_sincronizar(depois) {
           var d = e.dados || {};
           t.nome = e.nome;
           t.matriz_id = e.matriz_id || null;
+          t.tipo = e.tipo || d.tipo || ((e.matriz_id == null && /grupo|holding/i.test(String(e.nome || ""))) ? "holding" : (t.tipo || "empresa"));
           t.token = e.token || null;
           t.email = e.email_admin || t.email;
           t.provisionado = !!e.token;
@@ -5642,6 +5583,7 @@ try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
 
 </script>
 <script>
+/* VYOHA CONSOLE · V5 · EDICAO, ACESSO E EXCLUSAO ADMINISTRATIVA */
 /* ===============================================================
    VYOHA CONSOLE · FASE 17 · A TELA EMPRESAS VOLTA A ABRIR
 
