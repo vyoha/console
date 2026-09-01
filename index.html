@@ -1121,9 +1121,9 @@ function diasAtraso(tid) {
 function inadimplente(tid) { return diasAtraso(tid) > 0; }
 function mrr(t) { return t.licenca && t.licenca.status !== "cancelada" ? Number(t.licenca.valor || 0) : 0; }
 function ultimoAcesso(tid) {
-  var us = DB.users.filter(function (u) { return u.tenant_id === tid && u.acesso; });
+  var us = DB.users.filter(function (u) { return u.tenant_id === tid && (u.ultimo_acesso || u.acesso); });
   if (!us.length) return null;
-  return srt(us, function (u) { return u.acesso; }, true)[0].acesso;
+  return srt(us, function (u) { return u.ultimo_acesso || u.acesso; }, true)[0].ultimo_acesso || srt(us, function (u) { return u.ultimo_acesso || u.acesso; }, true)[0].acesso;
 }
 function diasSemAcesso(tid) {
   var a = ultimoAcesso(tid); if (!a) return 999;
@@ -2554,6 +2554,7 @@ function modalExcluirEmpresa(id) {
       "Não tem volta. Se a intenção for só bloquear o acesso, use <b>Suspender</b> — a suspensão preserva tudo.", "ng") +
     ln("Empresa", t.nome) + ln("Registros que serão apagados", String(regs)) +
     ln("Situação atual", sitNome(t.situacao)) +
+    nota("A exclusão definitiva é uma ação extrema. Ela exige autenticação válida da equipe Vyoha, confirmação do nome exato e execução autorizada no servidor. Não há exclusão automática por engano.", "inf") +
     '<div class="fld" style="margin-top:12px"><label>Digite o nome da empresa para confirmar</label><input id="ex-nome" placeholder="' + esc(t.nome) + '"></div>',
     '<button class="btn" onclick="fecharModal()">Cancelar</button>' +
     '<button class="btn btn-d" onclick="excluirEmpresa(\'' + id + '\')">Excluir definitivamente</button>');
@@ -4629,6 +4630,13 @@ function f4_sincronizar(depois) {
 
   f4_rpc("rede_empresas").then(function (r) {
     if (Array.isArray(r.corpo)) {
+      /* O servidor é a autoridade: empresas que não existem mais na rede
+         não podem permanecer presas no cache local do Console. */
+      var idsServidor = {};
+      r.corpo.forEach(function (e) { idsServidor[e.tenant_id] = true; });
+      DB.tenants = (DB.tenants || []).filter(function (t) {
+        return t && (idsServidor[t.id] || t.id === "vyoha");
+      });
       r.corpo.forEach(function (e) {
         var t = find(DB.tenants, e.tenant_id);
         if (!t) { t = { id: e.tenant_id, criada: today() }; DB.tenants.push(t); }
@@ -5083,6 +5091,10 @@ function f5_excluirEmpresa(id) {
   rpcConsole("console_excluir_empresa", { p_tenant: id }).then(function (r) {
     var m = f5_erro(r, "O servidor recusou a exclusao");
     if (m) { toast(m, "err"); return; }
+    if (!r || !r.corpo || r.corpo.ok !== true) {
+      toast("O servidor não confirmou a exclusão. Nada foi removido do Console.", "err");
+      return;
+    }
     var nome = t.nome;
     ["customers","products","moves","sales","parcels","cash","metas","cobrancas","acordos",
      "faturas","tickets","growth","solicitacoes","implantacoes","contratos","config","users","sessoes"]
@@ -5645,7 +5657,6 @@ try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
      Pilar Credmoveis tmsb5rsft64ds  cardEmpresa ok
      Pilar Credmoveis tmsf5ettc53hx  cardEmpresa ok
      Pilar Credmoveis tmsf6ons427kx  cardEmpresa ERRO
-     TESTE VYOHA      tca3b30cba4f7  cardEmpresa ok
 
    O registro de implantacao de tmsf6ons427kx e este:
 
