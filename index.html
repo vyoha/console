@@ -2082,6 +2082,7 @@ function emp_financeiro(t) {
   return h;
 }
 function baixarFatura(id) {
+  if (!consolePodeOperar("baixar a fatura")) return;
   var f = find(DB.faturas, id);
   if (!f) return toast("Título não encontrado.", "err");
   confirmar("Confirmar pagamento", "Dar baixa em " + money(f.valor) + " de " + nomeEmpresa(f.tenant_id) + "?", function () {
@@ -2261,6 +2262,7 @@ function salvarRede() {
   verEmpresa(novo.id, "empresa");
 }
 function salvarEmpresa(id) {
+  if (!consolePodeOperar("salvar a empresa")) return;
   /* Edição/cadastro pelo Console Vyoha: a Vyoha não depende da holding. */
   return f5_salvarEmpresa(id);
 }
@@ -2508,6 +2510,7 @@ function modalExcluirEmpresa(id) {
     '<button class="btn btn-d" onclick="excluirEmpresa(\'' + id + '\')">Excluir definitivamente</button>');
 }
 function excluirEmpresa(id) {
+  if (!consolePodeOperar("excluir a empresa")) return;
   var t = find(DB.tenants, id);
   if (v("ex-nome").trim().toLowerCase() !== String(t.nome).trim().toLowerCase())
     return toast("Digite o nome exato da empresa para confirmar.", "err");
@@ -2658,6 +2661,7 @@ function analisar(id) {
   modal("Solicitação de " + esc(t.nome), corpo, rod, true);
 }
 function decidir(id, decisao) {
+  if (!consolePodeOperar("decidir a solicitação")) return;
   var s = find(DB.solicitacoes, id);
   if (!s) return toast("Solicitação não encontrada.", "err");
   var parecer = v("sl-obs"), valor = nv("sl-valor"), comp = v("sl-comp") || mesRef(today());
@@ -2715,6 +2719,7 @@ function soltarCard(ev, etapa) {
   moverEtapa(id, etapa);
 }
 function moverEtapa(tid, etapa) {
+  if (!consolePodeOperar("alterar a implantação")) return;
   var t = find(DB.tenants, tid), im = implantacaoDe(tid);
   if (!im || im.etapa === etapa) return;
   if (!t.provisionado && ETAPAS.indexOf(etapa) > ETAPAS.indexOf("pagamento_confirmado")) {
@@ -3271,6 +3276,7 @@ function modalDespesa() {
     '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarDespesa()">Lançar</button>');
 }
 function salvarDespesa() {
+  if (!consolePodeOperar("salvar a despesa")) return;
   var d = v("dp-desc"), val = nv("dp-valor");
   if (!d) return toast("Informe a descrição.", "err");
   if (val <= 0) return toast("Informe um valor maior que zero.", "err");
@@ -3466,6 +3472,7 @@ function corpoChamado(t, aba) {
     '<button class="btn btn-p" onclick="responderChamado(\'' + t.id + '\')">Enviar resposta</button></div></div>';
 }
 function responderChamado(id) {
+  if (!consolePodeOperar("responder o chamado")) return;
   var t = find(DB.tickets, id), txt = el("ch-txt").value.trim();
   if (!t) return toast("Chamado não encontrado.", "err");
   if (!txt) return toast("Escreva a resposta.", "err");
@@ -3484,6 +3491,7 @@ function responderChamado(id) {
   }).catch(function () { toast("Sem resposta do servidor. A resposta não foi enviada.", "err"); });
 }
 function resolverChamado(id) {
+  if (!consolePodeOperar("resolver o chamado")) return;
   var t = find(DB.tickets, id);
   if (!t) return toast("Chamado não encontrado.", "err");
   confirmar("Resolver chamado", "Marcar “" + esc(t.assunto) + "” como resolvido?", function () {
@@ -3720,7 +3728,18 @@ function supaPedido(caminho, opcoes) {
   o.headers = Object.assign({
     apikey: c.key, Authorization: "Bearer " + (SUPA_TOKEN || c.key), "Content-Type": "application/json"
   }, o.headers || {});
-  return fetch(c.url + caminho, o);
+  CONSOLE_ESTADO.sincronizando = true;
+  return fetch(c.url + caminho, o).then(function (r) {
+    if (r.status === 401 || r.status === 403) consoleEstadoServidor("sessao_expirada", "Sua sessão no servidor expirou.");
+    else if (!r.ok) consoleEstadoServidor("erro", "O servidor recusou a operação (" + r.status + ").");
+    else consoleSucesso();
+    CONSOLE_ESTADO.sincronizando = false;
+    return r;
+  }).catch(function (e) {
+    CONSOLE_ESTADO.sincronizando = false;
+    consoleEstadoServidor("offline", "Sem resposta do servidor.");
+    throw e;
+  });
 }
 function carregarLeads() {
   if (!supaConfigurado() || !supaAutenticado()) return;
@@ -4437,7 +4456,7 @@ function pg_acessos() {
     box("O que está no servidor", '<div class="box-b">' +
       nota(emDia
         ? "<b>Tudo publicado.</b> O mapa das empresas e os ambientes no servidor estão iguais ao que existe aqui."
-        : "<b>Tem coisa para subir.</b> Vai sozinho em instantes — o console publica ao abrir e a cada minuto, " +
+        : "<b>Tem coisa para subir.</b> Vai sozinho em instantes — o console verifica ao abrir e a cada 30 segundos, " +
           "sempre que alguma coisa muda. Se quiser não esperar, use o botão.", emDia ? "ok" : "wr") +
       '<div class="sm mut" style="margin:12px 0">O <b>mapa</b> diz ao servidor quais empresas somar para cada gestor de rede, ' +
       "e leva o token e o e-mail do dono — é isso que permite um acesso perdido se religar sozinho. " +
@@ -4455,6 +4474,23 @@ function pg_acessos() {
       '<button class="btn" style="margin-top:14px" onclick="carregarCopiasVyoha()">Atualizar</button></div>');
   h += '<div style="height:14px"></div><div id="ac-lista"><div class="box"><div class="box-b sm mut">Consultando o Supabase…</div></div></div>';
   return h;
+}
+
+function consoleEstadoIncompleto() {
+  var problemas = [];
+  if (!supaConfigurado()) problemas.push("Supabase não configurado");
+  if (!supaAutenticado()) problemas.push("sessão do servidor não autenticada");
+  if (!Array.isArray(DB.tenants)) problemas.push("empresas indisponíveis");
+  if (!Array.isArray(DB.users)) problemas.push("usuários indisponíveis");
+  return problemas;
+}
+function consolePodeOperar(acao) {
+  var p = consoleEstadoIncompleto();
+  if (p.length) {
+    consoleErro("Não é seguro " + (acao || "executar esta ação") + " agora.", "Estado incompleto: " + p.join(", ") + ".");
+    return false;
+  }
+  return true;
 }
 
 (function () {
@@ -4527,6 +4563,7 @@ function f4_falhou(ctx, e) {
 
 function f4_rpc(nome, corpo) {
   var c = supaCfg();
+  CONSOLE_ESTADO.sincronizando = true;
   return fetch(c.url + "/rest/v1/rpc/" + nome, {
     method: "POST",
     headers: {
@@ -4535,7 +4572,21 @@ function f4_rpc(nome, corpo) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify(corpo || {})
-  }).then(function (r) { return r.json().then(function (j) { return { status: r.status, corpo: j }; }); });
+  }).then(function (r) {
+    return r.text().then(function (txt) {
+      var j = {};
+      try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = { erro: txt || "Resposta inválida do servidor." }; }
+      if (r.status === 401 || r.status === 403) consoleEstadoServidor("sessao_expirada", "Sua sessão no servidor expirou.");
+      else if (!r.ok) consoleEstadoServidor("erro", (j && (j.erro || j.message)) || ("Servidor respondeu " + r.status + "."));
+      else consoleSucesso();
+      CONSOLE_ESTADO.sincronizando = false;
+      return { status: r.status, corpo: j };
+    });
+  }).catch(function (e) {
+    CONSOLE_ESTADO.sincronizando = false;
+    consoleEstadoServidor("offline", "Não foi possível conectar ao servidor.");
+    return { status: 0, corpo: { erro: "Sem resposta do servidor. Verifique a conexão com a internet." }, erro_rede: e };
+  });
 }
 
 function f4_entrar(mail, senha) {
@@ -4836,6 +4887,30 @@ if (document.readyState === "loading") {
    =============================================================== */
 var F5_ENTREGA = {};
 
+var CONSOLE_ESTADO = { servidor: "ok", sincronizando: false, ultima_sincronizacao: null, erro: "" };
+function consoleEstadoServidor(estado, erro) {
+  CONSOLE_ESTADO.servidor = estado || "ok";
+  CONSOLE_ESTADO.erro = erro || "";
+  try {
+    document.body.setAttribute("data-servidor", CONSOLE_ESTADO.servidor);
+    document.body.setAttribute("data-servidor-erro", CONSOLE_ESTADO.erro);
+  } catch (e) {}
+}
+function consoleErro(msg, detalhe) {
+  var m = String(msg || "Não foi possível concluir a operação.");
+  if (detalhe) m += " " + String(detalhe);
+  consoleEstadoServidor("erro", m);
+  toast(m, "err");
+}
+function consoleSucesso() {
+  consoleEstadoServidor("ok", "");
+}
+function f5_resposta(r, padrao) {
+  var e = f5_erro(r, padrao);
+  if (e) { consoleErro(e); return false; }
+  consoleSucesso();
+  return true;
+}
 function f5_erro(r, padrao) {
   var c = (r && r.corpo) || {};
   if (c.erro) return c.erro;
