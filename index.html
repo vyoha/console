@@ -501,7 +501,7 @@ function nv(id) { var s = v(id); if (s.indexOf(",") >= 0) s = s.replace(/\./g, "
 function ck(id) { var e = el(id); return e ? e.checked : false; }
 function sum(a, f) { var t = 0; for (var i = 0; i < a.length; i++) t += Number(f ? f(a[i]) : a[i]) || 0; return t; }
 function find(a, id) { for (var i = 0; i < a.length; i++) if (a[i].id === id) return a[i]; return null; }
-function srt(a, f, d) { return a.slice().sort(function (x, y) { var p = f(x), q = f(y); return p < q ? (d ? 1 : -1) : p > q ? (d ? -1 : 1) : 0; }); }
+function srt(a, f, d) { a = Array.isArray(a) ? a : []; return a.slice().sort(function (x, y) { var p = f(x), q = f(y); return p < q ? (d ? 1 : -1) : p > q ? (d ? -1 : 1) : 0; }); }
 function toast(msg, kind) {
   var w = el("toasts"), d = document.createElement("div");
   d.className = "tst " + (kind || "");
@@ -970,7 +970,7 @@ var DB = null;
 /* todas as coleções do banco compartilhado — a migração garante que existam */
 var COLECOES = ["tenants", "config", "users", "customers", "products", "moves", "sales", "parcels", "cash",
   "metas", "cobrancas", "acordos", "leads", "faturas", "tickets", "growth", "logs",
-  "planos", "solicitacoes", "implantacoes", "contratos", "sessoes", "despesas"];
+  "planos", "solicitacoes", "implantacoes", "contratos", "contrato_versoes", "contrato_assinaturas", "contrato_aditivos", "sessoes", "despesas"];
 
 /* ---------- ciclo de vida da empresa ---------- */
 var SITUACAO = {
@@ -1326,6 +1326,9 @@ function migrar() {
       mudou = true;
     }
     if (t.licenca && !t.licenca.extras) { t.licenca.extras = {}; mudou = true; }
+    if (t.licenca && t.licenca.aviso_previo_dias == null) { t.licenca.aviso_previo_dias = 0; mudou = true; }
+    if (t.licenca && t.licenca.multa_rescisao_pct == null) { t.licenca.multa_rescisao_pct = 0; mudou = true; }
+    if (t.licenca && !t.licenca.recorrencia) { t.licenca.recorrencia = t.licenca.fidelizacao_meses ? "fidelizacao" : "mensal_sem_fidelizacao"; mudou = true; }
     if (t.tipo === "holding" && t.licenca && t.licenca.limites && t.licenca.limites.empresas == null) {
       t.licenca.limites.empresas = Math.max(LIMITES_PADRAO.empresas, daRede(t.id).length);
       mudou = true;
@@ -1357,12 +1360,20 @@ function novaImplantacao(t, concluida) {
   };
 }
 function implantacaoDe(tid) {
-  for (var i = 0; i < DB.implantacoes.length; i++) if (DB.implantacoes[i].tenant_id === tid) return DB.implantacoes[i];
+  var l = Array.isArray(DB && DB.implantacoes) ? DB.implantacoes : [];
+  for (var i = 0; i < l.length; i++) if (l[i].tenant_id === tid) return l[i];
   return null;
 }
 function contratoDe(tid) {
-  var l = DB.contratos.filter(function (c) { return c.tenant_id === tid; });
-  return l.length ? srt(l, function (c) { return c.versao; }, true)[0] : null;
+  var base = Array.isArray(DB && DB.contratos) ? DB.contratos : [];
+  var l = base.filter(function (c) { return c.tenant_id === tid; });
+  return l.length ? srt(l, function (c) { return c.versao_atual || c.versao || 0; }, true)[0] : null;
+}
+function contratoVersaoDe(tid) {
+  var c = contratoDe(tid);
+  if (!c) return null;
+  var vs = Array.isArray(DB && DB.contrato_versoes) ? DB.contrato_versoes.filter(function(v){return v.tenant_id===tid;}) : [];
+  return vs.length ? srt(vs,function(v){return v.versao;},true)[0] : null;
 }
 
 /* ---------- ambiente inicial do console ---------- */
@@ -1764,7 +1775,7 @@ function cardEmpresa(t) {
     "cliente desde " + fdate(t.criada) + "</div></div>" +
     "<div style='text-align:right'>" + sit(t.situacao) + (alerta ? "<div style='margin-top:5px'>" + alerta + "</div>" : "") + "</div></div>" +
     '<div class="grid c4" style="gap:10px;margin-bottom:12px">' +
-    '<div><div class="sm mut">Manutenção</div><b style="font-size:13.5px">' + money(mrr(t)) + "</b></div>" +
+    '<div><div class="sm mut">Mensalidade</div><b style="font-size:13.5px">' + money(mrr(t)) + "</b></div>" +
     '<div><div class="sm mut">Administradores</div><b style="font-size:13.5px">' + u.admins.uso + " de " + u.admins.lim + "</b></div>" +
     '<div><div class="sm mut">PDVs</div><b style="font-size:13.5px">' + u.pdvs.uso + " de " + u.pdvs.lim + "</b></div>" +
     '<div><div class="sm mut">Último acesso</div><b style="font-size:13.5px">' +
@@ -1886,6 +1897,72 @@ function emp_contrato(t) {
   }
   return h;
 }
+function uploadContratoAssinado(id, input) {
+  var t = find(DB.tenants, id), c = contratoDe(id), file = input && input.files ? input.files[0] : null;
+  if (!t || !c || !file) return;
+  if (String(file.type || "").toLowerCase() !== "application/pdf" && !/\.pdf$/i.test(file.name)) {
+    input.value = ""; return toast("Envie somente um arquivo PDF.", "err");
+  }
+  if (file.size > 15 * 1024 * 1024) { input.value = ""; return toast("O PDF deve ter no máximo 15 MB.", "err"); }
+  if (!supaAutenticado()) { input.value = ""; return toast("Sua sessão no servidor expirou. Entre novamente.", "err"); }
+  var cfig = supaCfg();
+  var safe = String(file.name || "contrato-assinado.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
+  var path = id + "/" + Date.now() + "-" + safe;
+  toast("Enviando contrato assinado...", "ok");
+  file.arrayBuffer().then(function (buf) {
+    return fetch(cfig.url + "/storage/v1/object/contratos/" + encodeURIComponent(path).replace(/%2F/g, "/"), {
+      method: "POST",
+      headers: { apikey: cfig.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/pdf", "x-upsert": "true" },
+      body: buf
+    });
+  }).then(function (r) {
+    return r.text().then(function (txt) { var j={}; try{j=txt?JSON.parse(txt):{};}catch(e){} if(!r.ok) throw new Error(j.message||j.error||"Falha ao enviar o PDF."); return j; });
+  }).then(function () {
+    var novo = Object.assign({}, c, { arquivo: file.name, storage_path: path, storage_bucket: "contratos", arquivo_assinado: true, arquivo_assinado_em: new Date().toISOString(), status: "assinado", assinado: c.assinado || today(), id: c.id, tenant_id: id });
+    return rpcConsole("console_salvar", { colecao: "contratos", registro: novo }).then(function (r) {
+      var m=f5_erro(r,"O servidor recusou o registro do contrato"); if(m) throw new Error(m);
+      Object.assign(c, novo); auditar("Contrato assinado anexado", t.nome, file.name, id); save();
+      toast("Contrato assinado anexado ao servidor.", "ok"); verEmpresa(id, "contrato");
+    });
+  }).catch(function (e) { toast(e.message || "Não foi possível anexar o contrato.", "err"); });
+}
+function abrirContratoArquivo(id) {
+  var c=contratoDe(id); if(!c || !c.storage_path) return toast("Nenhum PDF assinado anexado.","err");
+  if(!supaAutenticado()) return toast("Sua sessão no servidor expirou. Entre novamente.","err");
+  var cfg=supaCfg(), path=String(c.storage_path).split("/").map(encodeURIComponent).join("/");
+  fetch(cfg.url+"/storage/v1/object/sign/contratos/"+path,{method:"POST",headers:{apikey:cfg.key,Authorization:"Bearer "+SUPA_TOKEN,"Content-Type":"application/json"},body:JSON.stringify({expiresIn:600})})
+    .then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.message||j.error||"Não foi possível abrir o arquivo.");return j;});})
+    .then(function(j){var u=j.signedURL||j.signedUrl||j.url;if(!u)throw new Error("O servidor não retornou o arquivo.");if(/^\//.test(u))u=cfg.url+"/storage/v1"+u;window.open(u,"_blank");})
+    .catch(function(e){toast(e.message||"Não foi possível abrir o PDF.","err");});
+}
+function imprimirContratoEmpresa(id) {
+  var t=find(DB.tenants,id), c=contratoDe(id); if(!t) return toast("Empresa não encontrada.","err");
+  var l=t.licenca||{}, dc=c&&c.dados_contratuais||{}, ct=dc.contratante||{};
+  var recorr=l.fidelizacao_meses?"fidelização de "+l.fidelizacao_meses+" meses":"recorrência mensal sem fidelização";
+  var aviso = Number(l.aviso_previo_dias || 0);
+  var multa = Number(l.multa_rescisao_pct || 0);
+  var cobr={antes_liberacao:"antes da liberação do ambiente",na_assinatura:"na assinatura do contrato",na_ativacao:"na ativação do ambiente",data_especifica:"em data específica"}[l.cobranca_implantacao]||"antes da liberação do ambiente";
+  var ini={ativacao:"na ativação do ambiente","30_dias_ativacao":"30 dias após a ativação",data_especifica:"em data específica"}[l.inicio_mensalidade_regra]||"na ativação do ambiente";
+  var w=window.open("","_blank"); if(!w) return toast("O navegador bloqueou a janela de impressão.","err");
+  var html='<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Contrato - '+esc(t.nome)+'</title><style>body{font:14px Arial,sans-serif;line-height:1.55;color:#111;margin:40px auto;max-width:820px}h1{text-align:center;font-size:22px}h2{font-size:16px;margin-top:24px}.meta{background:#f5f5f5;padding:14px;border-radius:8px}table{width:100%;border-collapse:collapse}td{padding:7px;border-bottom:1px solid #ddd}.sig{display:grid;grid-template-columns:1fr 1fr;gap:60px;margin-top:70px}.line{border-top:1px solid #111;padding-top:8px;text-align:center}@media print{body{margin:20mm auto}.no-print{display:none}}</style></head><body>'+
+    '<div class="no-print" style="text-align:right"><button onclick="print()">Imprimir / salvar PDF</button></div>'+
+    '<h1>CONTRATO DE PRESTAÇÃO DE SERVIÇOS</h1><p style="text-align:center"><b>VYOHA | Gestão empresarial</b></p>'+
+    '<div class="meta"><b>CONTRATADA:</b> Maria Fernanda Pereira de Aguiar, CPF nº 121.750.664-01, titular da marca Vyoha | Gestão empresarial, e-mail vyohabr@gmail.com.</div>'+
+    '<div class="meta" style="margin-top:10px"><b>CONTRATANTE:</b> '+esc(ct.razao||t.razao||t.nome||"")+' — '+esc(ct.cnpj||t.cnpj||"CPF/CNPJ não informado")+'<br><b>Nome fantasia:</b> '+esc(t.nome)+'<br><b>Representante:</b> '+esc(ct.representante||t.representante||"")+'</div>'+
+    '<h2>1. Objeto</h2><p>Prestação de serviços de implantação, disponibilização e manutenção do ambiente contratado da Vyoha, conforme módulos, limites e condições comerciais registrados no cadastro da empresa.</p>'+
+    '<h2>2. Implantação</h2><p>Valor da implantação: <b>'+money(l.valor_licenca||0)+'</b>. A cobrança ocorre '+esc(cobr)+'. O ambiente será liberado conforme as condições comerciais e de pagamento pactuadas.</p>'+
+    '<h2>3. Mensalidade</h2><p>Valor mensal: <b>'+money(l.valor||0)+'</b>. Vencimento: <b>dia '+esc(l.dia_venc||10)+'</b>. O início da mensalidade ocorrerá '+esc(ini)+'.</p>'+
+    '<h2>4. Modelo de contratação</h2><p>'+esc(recorr)+'. O prazo e as condições específicas de renovação, alteração e encerramento serão os registrados na contratação e em seus respectivos aditivos.</p>'+
+    '<h2>5. Cancelamento e rescisão</h2><p>Aviso prévio: <b>'+(aviso?esc(aviso)+' dias':'não definido')+'</b>. Multa por rescisão antecipada: <b>'+(multa?esc(multa)+'%':'não definida')+'</b>. Nenhuma condição não preenchida será presumida.</p>'+
+    '<h2>6. Acesso, segurança e suporte</h2><p>A Vyoha disponibilizará o ambiente e os acessos contratados. Credenciais são pessoais e não devem ser compartilhadas. O suporte e as atualizações seguem o escopo comercial contratado.</p>'+
+    '<h2>7. Alterações e aditivos</h2><p>Alterações de valores, módulos, limites, prazo ou demais condições comerciais serão formalizadas por aditivo ou nova versão contratual, preservando o histórico das versões anteriores.</p>'+
+    '<h2>8. Dados e confidencialidade</h2><p>As partes comprometem-se a utilizar os dados acessados em razão da contratação somente para as finalidades legítimas da prestação dos serviços e a adotar medidas razoáveis de segurança e confidencialidade.</p>'+
+    '<h2>9. Disposições finais</h2><p>Este documento representa o modelo contratual da contratação registrada no Console Vyoha. A assinatura eletrônica será realizada pelas partes conforme o método acordado, podendo o PDF assinado ser armazenado no sistema.</p>'+
+    '<div class="sig"><div class="line">Maria Fernanda Pereira de Aguiar<br>CPF 121.750.664-01<br>CONTRATADA — Vyoha</div><div class="line">'+esc(ct.representante||t.representante||"Representante da contratante")+'<br>'+esc(ct.cnpj||t.cnpj||"CPF/CNPJ")+'<br>CONTRATANTE</div></div>'+
+    '</body></html>';
+  w.document.open();w.document.write(html);w.document.close();
+}
+
 function assinarContrato(id) {
   var t = find(DB.tenants, id), c = contratoDe(id);
   if (!t || !c) return toast("Contrato não encontrado.", "err");
@@ -1904,24 +1981,39 @@ function assinarContrato(id) {
   }, "Confirmar");
 }
 function modalAditivo(id) {
+  var c = contratoDe(id), l = (find(DB.tenants, id) || {}).licenca || {};
+  if (!c) return toast("Contrato não encontrado.", "err");
   modal("Registrar aditivo",
-    '<div class="fld"><label>Descrição do aditivo <span class="rq">*</span></label><input id="ad-desc" placeholder="ex.: ampliação para 4 PDVs"></div>' +
+    nota("O aditivo cria uma <b>nova versão contratual</b>, preserva a anterior e deixa a nova versão aguardando assinatura. Se houver alteração comercial, atualize os campos abaixo.", "inf") +
+    '<div class="fld"><label>Descrição do aditivo <span class="rq">*</span></label><input id="ad-desc" placeholder="ex.: ampliação para 4 PDVs e alteração da mensalidade"></div>' +
+    '<div class="rw rw3"><div class="fld"><label>Implantação</label><input id="ad-impl" value="' + esc(String(l.valor_licenca == null ? 0 : l.valor_licenca)) + '"></div>' +
+    '<div class="fld"><label>Mensalidade</label><input id="ad-man" value="' + esc(String(l.valor == null ? 0 : l.valor)) + '"></div>' +
+    '<div class="fld"><label>Vencimento</label><input id="ad-dia" type="number" min="1" max="28" value="' + esc(String(l.dia_venc || 10)) + '"></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>Modelo</label><select id="ad-rec"><option value="mensal_sem_fidelizacao">Recorrência mensal sem fidelização</option><option value="fidelizacao">Fidelização por prazo determinado</option></select></div>' +
+    '<div class="fld"><label>Fidelização (meses)</label><input id="ad-fidel" type="number" min="0" max="120" value="' + esc(String(l.fidelizacao_meses || 0)) + '"></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>Aviso prévio (dias)</label><input id="ad-aviso" type="number" min="0" max="365" value="' + esc(String(l.aviso_previo_dias || 0)) + '"></div>' +
+    '<div class="fld"><label>Multa por rescisão antecipada (%)</label><input id="ad-multa" type="number" min="0" max="100" step="0.01" value="' + esc(String(l.multa_rescisao_pct || 0)) + '"></div></div>' +
     '<div class="fld"><label>Data</label><input id="ad-data" type="date" value="' + today() + '"></div>',
-    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarAditivo(\'' + id + '\')">Registrar</button>');
+    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarAditivo(\'' + id + '\')">Criar nova versão</button>');
 }
 function salvarAditivo(id) {
-  var d = v("ad-desc"); if (!d) return toast("Descreva o aditivo.", "err");
-  var c = contratoDe(id); if (!c) return toast("Contrato não encontrado.", "err");
-  var aditivos = (c.aditivos || []).slice();
-  aditivos.push({ data: v("ad-data") || today(), desc: d, por: (me() || {}).nome || "Vyoha" });
-  var dados = Object.assign({}, c, { aditivos: aditivos, id: c.id, tenant_id: id });
-  rpcConsole("console_salvar", { colecao: "contratos", registro: dados }).then(function (r) {
-    var m = f5_erro(r, "O servidor recusou o aditivo");
-    if (m) return toast(m, "err");
-    c.aditivos = aditivos;
-    auditar("Aditivo registrado", nomeEmpresa(id), d, id);
-    save(); fecharModal(); toast("Aditivo registrado no servidor.", "ok"); verEmpresa(id, "contrato");
-  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
+  var desc = v("ad-desc"); if (!desc) return toast("Descreva o aditivo.", "err");
+  var t = find(DB.tenants, id), c = contratoDe(id); if (!t || !c) return toast("Contrato não encontrado.", "err");
+  var l = Object.assign({}, t.licenca || {});
+  l.valor_licenca = nv("ad-impl"); l.valor = nv("ad-man"); l.dia_venc = Math.min(28, Math.max(1, nv("ad-dia") || 10));
+  l.recorrencia = v("ad-rec") || "mensal_sem_fidelizacao"; l.fidelizacao_meses = l.recorrencia === "fidelizacao" ? Math.max(1, nv("ad-fidel") || 12) : 0;
+  l.aviso_previo_dias = Math.max(0, Math.min(365, nv("ad-aviso") || 0)); l.multa_rescisao_pct = Math.max(0, Math.min(100, nv("ad-multa") || 0));
+  var ad = { data: v("ad-data") || today(), desc: desc, por: (me() || {}).nome || "Vyoha", de_versao: Number(c.versao || 1), para_versao: Number(c.versao || 1) + 1 };
+  var novosAditivos = (c.aditivos || []).slice(); novosAditivos.push(ad);
+  var dc = Object.assign({}, c.dados_contratuais || {}, { implantacao: l.valor_licenca, mensalidade: l.valor, vencimento_mensalidade: l.dia_venc, recorrencia: l.recorrencia, fidelizacao_meses: l.fidelizacao_meses, aviso_previo_dias: l.aviso_previo_dias, multa_rescisao_pct: l.multa_rescisao_pct, atualizado_em: new Date().toISOString() });
+  var novo = Object.assign({}, c, { id: uid("ct"), versao: Number(c.versao || 1) + 1, status: "aguardando_assinatura", enviado: today(), assinado: null, arquivo: "contrato-" + (t.slug || id) + "-v" + (Number(c.versao || 1) + 1) + ".pdf", aditivos: novosAditivos, dados_contratuais: dc, tenant_id: id });
+  rpcConsole("console_salvar", { colecao: "contratos", registro: novo }).then(function(r){
+    var m=f5_erro(r,"O servidor recusou a nova versão"); if(m) throw new Error(m);
+    t.licenca = l; DB.contratos.push(novo);
+    rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: { licenca: l, situacao: "contrato_enviado" } }).then(function(){ });
+    auditar("Aditivo contratual criado", t.nome, desc + " · v" + novo.versao, id, "v" + c.versao, "v" + novo.versao);
+    save(); fecharModal(); toast("Aditivo criado. Nova versão aguardando assinatura.", "ok"); verEmpresa(id,"contrato");
+  }).catch(function(e){ toast(e.message || "Não foi possível criar o aditivo.","err"); });
 }
 function emp_licenca(t) {
   var u = usoLicenca(t), lim = limites(t);
@@ -1939,6 +2031,11 @@ function emp_licenca(t) {
     ln("Valor da implantação", money(t.licenca ? t.licenca.valor_licenca : 0)) +
     ln("Mensalidade", money(mrr(t)) + " por mês") +
     ln("Vencimento", "dia " + ((t.licenca && t.licenca.dia_venc) || 10)) +
+    ln("Cobrança da implantação", ({antes_liberacao:"antes da liberação",na_assinatura:"na assinatura",na_ativacao:"na ativação",data_especifica:"data específica"}[(t.licenca || {}).cobranca_implantacao] || "antes da liberação")) +
+    ln("Início da mensalidade", ({ativacao:"na ativação","30_dias_ativacao":"30 dias após a ativação",data_especifica:"data específica"}[(t.licenca || {}).inicio_mensalidade_regra] || "na ativação")) +
+    ln("Contratação", (t.licenca && t.licenca.fidelizacao_meses) ? "Fidelização de " + t.licenca.fidelizacao_meses + " meses" : "Mensal sem fidelização") +
+    ln("Aviso prévio", Number((t.licenca || {}).aviso_previo_dias || 0) ? Number((t.licenca || {}).aviso_previo_dias) + " dias" : "não definido") +
+    ln("Multa por rescisão antecipada", Number((t.licenca || {}).multa_rescisao_pct || 0) ? Number((t.licenca || {}).multa_rescisao_pct) + "%" : "não definida") +
     ln("Início", t.licenca ? fdate(t.licenca.inicio) : "—") +
     ln("Situação", t.licenca ? (t.licenca.status === "ativa" ? "Ativa" : t.licenca.status) : "—") +
     '<div style="margin-top:14px"><button class="btn btn-p" onclick="modalPlanoEmpresa(\'' + t.id + '\')">Alterar valores e limites</button></div>' +
@@ -2121,6 +2218,11 @@ function modalEmpresa(id, rede) {
   var t = id ? find(DB.tenants, id) : null;
   var hd = rede ? find(DB.tenants, rede) : null;
   if (!id && hd && vagasRede(hd).cheia) return toast("A rede " + hd.nome + " está no limite contratado. Amplie o limite na implantação da holding.", "err");
+  var lic = t && t.licenca ? t.licenca : {};
+  var recorr = lic.recorrencia || (lic.fidelizacao_meses ? "fidelizacao" : "mensal_sem_fidelizacao");
+  var fidel = Number(lic.fidelizacao_meses || (recorr === "fidelizacao" ? 12 : 0));
+  var cobrImpl = lic.cobranca_implantacao || "antes_liberacao";
+  var inicioMens = lic.inicio_mensalidade_regra || "ativacao";
   modal(t ? (ehHolding(t) ? "Editar rede" : "Editar empresa") : hd ? "Nova empresa · rede " + hd.nome : "Nova empresa",
     '<div class="rw rw2"><div class="fld"><label>Nome fantasia <span class="rq">*</span></label><input id="em-nome" value="' + esc(t ? t.nome : "") + '"></div>' +
     '<div class="fld"><label>Razão social</label><input id="em-razao" value="' + esc(t ? t.razao || "" : "") + '"></div></div>' +
@@ -2134,22 +2236,37 @@ function modalEmpresa(id, rede) {
     '<div class="rw rw3"><div class="fld"><label>Telefone</label><input id="em-tel" value="' + esc(t ? t.tel || "" : "") + '"></div>' +
     '<div class="fld"><label>WhatsApp</label><input id="em-whats" value="' + esc(t ? t.whats || "" : "") + '"></div>' +
     '<div class="fld"><label>Representante</label><input id="em-rep" value="' + esc(t ? t.representante || "" : "") + '"></div></div>' +
-    '<div class="rw rw2"><div class="fld"><label>E-mail do administrador <span class="rq">*</span></label><input id="em-mail" value="' +
-    esc(t ? t.email || "" : "") + '" placeholder="administrador@empresa.com"></div>' +
-    '<div class="fld"><label>Subdomínio</label><input id="em-slug" value="' + esc(t ? t.slug : "") + '" placeholder="empresa"></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>E-mail do administrador <span class="rq">*</span></label><input id="em-mail" value="' + esc(t ? t.email || "" : "") + '" placeholder="administrador@empresa.com"></div>' +
+    '<div class="fld"><label>Subdomínio</label><input id="em-slug" value="' + esc(t ? t.slug || "" : "") + '" placeholder="empresa"></div></div>' +
     seletorMatriz(t, rede) +
-    (t ? "" : '<div class="sm mut" style="margin:16px 0 8px">Valores desta empresa — você define caso a caso</div>' +
-      '<div class="rw rw3"><div class="fld"><label>Implantação (pagamento único)</label><input id="em-lic" value="0" placeholder="0,00"></div>' +
-      '<div class="fld"><label>Mensalidade</label><input id="em-man" value="0" placeholder="0,00"></div>' +
-      '<div class="fld"><label>Dia de vencimento</label><input id="em-dia" value="10"></div></div>' +
-      '<div class="sm mut" style="margin:14px 0 8px">Quantidade de acessos liberados</div>' +
-      '<div class="rw rw3"><div class="fld"><label>Administradores</label><input id="em-adm" value="' + LIMITES_PADRAO.admins + '"></div>' +
-      '<div class="fld"><label>PDVs / vendedores</label><input id="em-pdv" value="' + LIMITES_PADRAO.pdvs + '"></div>' +
-      '<div class="fld"><label>Operacionais</label><input id="em-op" value="' + LIMITES_PADRAO.operacionais + '"></div></div>' +
-      nota("A empresa é cadastrada em <b>contrato assinado</b>. O ambiente, o token e o login só são criados depois que o pagamento inicial for confirmado.", "inf")),
-    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarEmpresa(' +
-    (t ? "'" + t.id + "'" : "") + ')">' + (t ? "Salvar" : "Cadastrar empresa") + "</button>", true);
+    '<div class="sm mut" style="margin:16px 0 8px">Condições comerciais e contratuais — cada empresa tem sua própria configuração</div>' +
+    '<div class="rw rw3"><div class="fld"><label>Implantação (pagamento único)</label><input id="em-lic" value="' + esc(String(lic.valor_licenca == null ? 0 : lic.valor_licenca)) + '" placeholder="0,00"></div>' +
+    '<div class="fld"><label>Mensalidade</label><input id="em-man" value="' + esc(String(lic.valor == null ? 0 : lic.valor)) + '" placeholder="0,00"></div>' +
+    '<div class="fld"><label>Dia de vencimento da mensalidade</label><input id="em-dia" type="number" min="1" max="28" value="' + esc(String(lic.dia_venc || 10)) + '"></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>Pagamento da implantação</label><select id="em-cobr-impl">' +
+      [['antes_liberacao','Antes da liberação do ambiente'],['na_assinatura','Na assinatura do contrato'],['na_ativacao','Na ativação do ambiente'],['data_especifica','Data específica']].map(function(o){ return '<option value="'+o[0]+'"'+(cobrImpl===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('') +
+    '</select><div class="hp">Define quando a implantação deverá ser cobrada/paga. O valor é o campo acima.</div></div>' +
+    '<div class="fld"><label>Data da implantação (se aplicável)</label><input id="em-data-impl" type="date" value="' + esc(lic.data_venc_implantacao || '') + '"></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>Início da mensalidade</label><select id="em-inicio-mens">' +
+      [['ativacao','Na ativação do ambiente'],['30_dias_ativacao','30 dias após a ativação'],['data_especifica','Data específica']].map(function(o){ return '<option value="'+o[0]+'"'+(inicioMens===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('') +
+    '</select><div class="hp">Define a regra de início da cobrança recorrente. A data efetiva pode ser preenchida automaticamente quando a ativação ocorrer.</div></div>' +
+    '<div class="fld"><label>Data de início (se específica)</label><input id="em-data-mens" type="date" value="' + esc(lic.data_inicio_mensalidade || '') + '"></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>Modelo de contratação</label><select id="em-recorrencia">' +
+      '<option value="mensal_sem_fidelizacao"' + (recorr==='mensal_sem_fidelizacao'?' selected':'') + '>Recorrência mensal sem fidelização</option>' +
+      '<option value="fidelizacao"' + (recorr==='fidelizacao'?' selected':'') + '>Fidelização por prazo determinado</option>' +
+    '</select></div>' +
+    '<div class="fld"><label>Prazo de fidelização (meses)</label><input id="em-fidel" type="number" min="0" max="120" value="' + esc(String(fidel)) + '" placeholder="Ex.: 12"><div class="hp">Use 0 quando não houver fidelização. Ex.: 12 = contrato com fidelização de 12 meses.</div></div></div>' +
+    '<div class="rw rw2"><div class="fld"><label>Aviso prévio para cancelamento (dias)</label><input id="em-aviso" type="number" min="0" max="365" value="' + esc(String(lic.aviso_previo_dias == null ? 0 : lic.aviso_previo_dias)) + '" placeholder="Ex.: 30"><div class="hp">0 = ainda não definido. Não será inventado no contrato.</div></div>' +
+    '<div class="fld"><label>Multa por rescisão antecipada (%)</label><input id="em-multa" type="number" min="0" max="100" step="0.01" value="' + esc(String(lic.multa_rescisao_pct == null ? 0 : lic.multa_rescisao_pct)) + '" placeholder="Ex.: 10"><div class="hp">0 = sem multa definida. Para fidelização, defina expressamente antes da assinatura.</div></div></div>' +
+    '<div class="sm mut" style="margin:14px 0 8px">Quantidade de acessos liberados</div>' +
+    '<div class="rw rw3"><div class="fld"><label>Administradores</label><input id="em-adm" value="' + esc(String(lic.limites && lic.limites.admins != null ? lic.limites.admins : LIMITES_PADRAO.admins)) + '"></div>' +
+    '<div class="fld"><label>PDVs / vendedores</label><input id="em-pdv" value="' + esc(String(lic.limites && lic.limites.pdvs != null ? lic.limites.pdvs : LIMITES_PADRAO.pdvs)) + '"></div>' +
+    '<div class="fld"><label>Operacionais</label><input id="em-op" value="' + esc(String(lic.limites && lic.limites.operacionais != null ? lic.limites.operacionais : LIMITES_PADRAO.operacionais)) + '"></div></div>' +
+    nota("Os valores e regras desta empresa entram automaticamente no contrato. Aditivos e alterações contratuais devem gerar nova versão do contrato e preservar o histórico anterior.", "inf") +
+    nota("A empresa é cadastrada em <b>contrato assinado</b>. O ambiente, o token e o login só são criados depois que o pagamento inicial for confirmado.", "inf"),
+    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarEmpresa(' + (t ? "'" + t.id + "'" : "") + ')">' + (t ? "Salvar" : "Cadastrar empresa") + "</button>", true);
 }
+
 function grupoResumo(t) {
   if (ehHolding(t)) {
     var vg = vagasRede(t);
@@ -2463,8 +2580,19 @@ function salvarPlanoEmpresa(id) {
     var e = f5_erro(r, "O servidor recusou os valores e limites");
     if (e) return toast(e, "err");
     t.licenca = lic;
-    auditar("Valores e limites alterados", t.nome, "", t.id, antes, depois);
-    save(); fecharModal(); toast("Valores e limites atualizados no servidor.", "ok"); verEmpresa(id, "licenca");
+    var dc = (contratoDe(id) || {}).dados_contratuais || {};
+    var comercial = Object.assign({}, dc, { implantacao: Number(lic.valor_licenca || 0), mensalidade: Number(lic.valor || 0), vencimento_mensalidade: Number(lic.dia_venc || 10), aviso_previo_dias: Number(lic.aviso_previo_dias || 0), multa_rescisao_pct: Number(lic.multa_rescisao_pct || 0), recorrencia: lic.recorrencia || "mensal_sem_fidelizacao", fidelizacao_meses: Number(lic.fidelizacao_meses || 0) });
+    var atual = contratoDe(id);
+    var versao = atual ? Number(atual.versao || 1) + 1 : 1;
+    var novoContrato = atual ? Object.assign({}, atual, { id: uid("ct"), versao: versao, status: "aguardando_assinatura", enviado: today(), assinado: null, dados_contratuais: comercial, aditivos: (atual.aditivos || []).slice() }) : null;
+    var salvarContrato = novoContrato ? rpcConsole("console_salvar", { colecao: "contratos", registro: novoContrato }) : Promise.resolve({ ok: true });
+    salvarContrato.then(function (rr) {
+      var ce = f5_erro(rr, "O servidor recusou a nova versão contratual");
+      if (ce) throw new Error(ce);
+      if (novoContrato) DB.contratos.push(novoContrato);
+      auditar("Valores e limites alterados", t.nome, "Nova versão contratual v" + versao, t.id, antes, depois);
+      save(); fecharModal(); toast(novoContrato ? "Valores atualizados e nova versão contratual criada." : "Valores e limites atualizados no servidor.", "ok"); verEmpresa(id, novoContrato ? "contrato" : "licenca");
+    }).catch(function(e){ toast(e.message || "Não foi possível atualizar o contrato.", "err"); });
   }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 function modalExcluirEmpresa(id) {
@@ -2788,9 +2916,20 @@ function salvarImplantacao(tid) {
 function emp_implantacao(t) {
   var im = implantacaoDe(t.id);
   if (!im) return '<div class="box">' + vazio("Sem implantação registrada", "", "", "crescimento") + "</div>";
+  /* Registros antigos podem não ter estas coleções. Nunca deixe uma tela
+     operacional chamar .slice(), .map() ou .filter() em undefined. */
+  if (!Array.isArray(im.historico)) im.historico = [];
+  if (!Array.isArray(im.checklist)) im.checklist = [];
+  im.historico = im.historico.filter(function (x) { return x && typeof x === "object"; });
+  im.checklist = im.checklist.filter(function (x) { return x && typeof x === "object"; });
+  if (!im.checklist.length) {
+    im.checklist = CHECKLIST_PADRAO.map(function (x) { return { t: x, ok: false }; });
+  }
+  var hist = srt(im.historico, function (x) { return x.data || ""; }, true);
+  var desde = hist.length && hist[0].data ? fdate(hist[0].data) : (im.inicio ? fdate(im.inicio) : "—");
   var h = '<div class="grid c3" style="margin-bottom:18px">' +
-    metric("Etapa atual", ETAPA_LBL[im.etapa] || im.etapa, "desde " + fdate(srt(im.historico, function (x) { return x.data; }, true)[0].data)) +
-    metric("Checklist", progImplantacao(im) + "%", im.checklist.filter(function (c) { return c.ok; }).length + " de " + im.checklist.length + " itens", progImplantacao(im) === 100 ? "pos" : "inf") +
+    metric("Etapa atual", ETAPA_LBL[im.etapa] || im.etapa, "desde " + desde) +
+    metric("Checklist", progImplantacao(im) + "%", im.checklist.filter(function (c) { return c && c.ok; }).length + " de " + im.checklist.length + " itens", progImplantacao(im) === 100 ? "pos" : "inf") +
     metric("Início", fdate(im.inicio), diasDe(im.inicio)) +
     "</div>";
   h += box("Etapas", '<div class="box-b"><div style="display:flex;flex-wrap:wrap;gap:8px">' + ETAPAS.map(function (e, i) {
@@ -4602,7 +4741,7 @@ function f4_espelhar(ident) {
 
 function f4_sincronizar(depois) {
   if (!SUPA_TOKEN) { if (depois) depois(false); return; }
-  var colecoes = ["faturas", "contratos", "implantacoes", "planos", "solicitacoes", "tickets", "despesas"];
+  var colecoes = ["faturas", "contratos", "implantacoes", "contrato_versoes", "contrato_assinaturas", "contrato_aditivos", "planos", "solicitacoes", "tickets", "despesas"];
   var pendentes = 3 + colecoes.length;
   function fim() { if (--pendentes <= 0) { save(); if (depois) depois(true); } }
 
@@ -4671,6 +4810,22 @@ function f4_sincronizar(depois) {
           var d = x.dados || {};
           d.id = x.id; d.tenant_id = x.tenant_id;
           d.criado_em = x.criado_em; d.atualizado_em = x.atualizado_em;
+          if (col === "implantacoes") {
+            /* Registros antigos podem não ter checklist/histórico no JSONB.
+               O servidor continua sendo a fonte; aqui apenas completamos
+               a estrutura necessária para a tela não quebrar. */
+            if (!Array.isArray(d.checklist)) {
+              d.checklist = CHECKLIST_PADRAO.map(function (x, i) {
+                var t = find(DB.tenants, d.tenant_id);
+                var provisionado = !!(t && (t.provisionado || t.token));
+                var concluida = d.etapa === "ativa";
+                return { t: x, ok: !!(concluida || (provisionado && i < 3)) };
+              });
+            }
+            if (!Array.isArray(d.historico)) {
+              d.historico = d.etapa ? [{ etapa: d.etapa, data: d.inicio || d.criado_em || null, user_id: null }] : [];
+            }
+          }
           return d;
         });
       }
@@ -4929,6 +5084,9 @@ window.leadParaEmpresa = f5_leadParaEmpresa;
 
 function f5_dadosDoFormulario() {
   var nome = v("em-nome");
+  var recorrencia = v("em-recorrencia") || "mensal_sem_fidelizacao";
+  var fidelizacao = Math.max(0, Number(v("em-fidel") || 0));
+  if (recorrencia === "mensal_sem_fidelizacao") fidelizacao = 0;
   return {
     nome: nome,
     email: String(v("em-mail")).trim().toLowerCase(),
@@ -4943,6 +5101,14 @@ function f5_dadosDoFormulario() {
       valor_licenca: nv("em-lic"), valor: nv("em-man"),
       dia_venc: Math.min(28, Math.max(1, nv("em-dia") || 10)),
       inicio: today(), pagamento_inicial: false, status: "pendente",
+      cobranca_implantacao: v("em-cobr-impl") || "antes_liberacao",
+      data_venc_implantacao: v("em-data-impl") || null,
+      inicio_mensalidade_regra: v("em-inicio-mens") || "ativacao",
+      data_inicio_mensalidade: v("em-data-mens") || null,
+      recorrencia: recorrencia,
+      fidelizacao_meses: fidelizacao,
+      aviso_previo_dias: Math.max(0, Math.min(365, nv("em-aviso") || 0)),
+      multa_rescisao_pct: Math.max(0, Math.min(100, nv("em-multa") || 0)),
       modulos: MODULOS_PADRAO.slice(), extras: {},
       limites: {
         admins: Math.max(1, nv("em-adm") || LIMITES_PADRAO.admins),
@@ -4965,7 +5131,40 @@ function f5_espelharEmpresa(tid, d, matriz, novo) {
   ["razao","cnpj","ie","segmento","cidade","uf","funcionarios","endereco","tel","whats","representante","slug"]
     .forEach(function (k) { t[k] = d[k]; });
   if (novo || !t.licenca) t.licenca = d.licenca;
+  else if (d.licenca) t.licenca = Object.assign({}, t.licenca, d.licenca, { pagamento_inicial: t.licenca.pagamento_inicial, status: t.licenca.status, inicio: t.licenca.inicio || d.licenca.inicio });
   return t;
+}
+
+function f5_atualizarContratoComercial(tid, d, contratoId) {
+  var atual = contratoDe(tid);
+  var dados = {
+    contratada: { nome: "Maria Fernanda Pereira de Aguiar", cpf: "12175066401", marca: "Vyoha | Gestão empresarial", email: "vyohabr@gmail.com", whatsapp: "81989086007" },
+    contratante: { nome: d.nome || "", razao: d.razao || "", cnpj: d.cnpj || "", email: d.email || "", cidade: d.cidade || "", uf: d.uf || "", representante: d.representante || "" },
+    implantacao: Number(d.licenca && d.licenca.valor_licenca || 0), mensalidade: Number(d.licenca && d.licenca.valor || 0),
+    vencimento_mensalidade: Number(d.licenca && d.licenca.dia_venc || 10),
+    cobranca_implantacao: d.licenca && d.licenca.cobranca_implantacao || "antes_liberacao",
+    data_venc_implantacao: d.licenca && d.licenca.data_venc_implantacao || null,
+    inicio_mensalidade_regra: d.licenca && d.licenca.inicio_mensalidade_regra || "ativacao",
+    data_inicio_mensalidade: d.licenca && d.licenca.data_inicio_mensalidade || null,
+    recorrencia: d.licenca && d.licenca.recorrencia || "mensal_sem_fidelizacao",
+    fidelizacao_meses: Number(d.licenca && d.licenca.fidelizacao_meses || 0),
+    aviso_previo_dias: Number(d.licenca && d.licenca.aviso_previo_dias || 0),
+    multa_rescisao_pct: Number(d.licenca && d.licenca.multa_rescisao_pct || 0),
+    atualizado_em: new Date().toISOString()
+  };
+  if (atual && atual.id) {
+    return rpcConsole("console_atualizar_contrato_rascunho", { p_contrato_id: atual.id, p_dados: Object.assign({}, atual.dados_contratuais || {}, dados) }).then(function (r) {
+      var m=f5_erro(r,"O servidor recusou a atualização do contrato"); if(m) throw new Error(m);
+      var c=r.corpo&&r.corpo.contrato, local=contratoDe(tid); if(c){ if(!local){DB.contratos.push(c);}else Object.assign(local,c); }
+      return c || local;
+    });
+  }
+  return rpcConsole("console_criar_contrato", { p_tenant_id: tid, p_dados: dados }).then(function (r) {
+    var m=f5_erro(r,"O servidor recusou a criação do contrato"); if(m) throw new Error(m);
+    var c=r.corpo&&r.corpo.contrato, vrs=r.corpo&&r.corpo.versao;
+    if(c){ DB.contratos=DB.contratos||[]; DB.contratos=DB.contratos.filter(function(x){return x.tenant_id!==tid;}); DB.contratos.push(c); }
+    return c;
+  });
 }
 
 function f5_salvarEmpresa(id) {
@@ -4985,9 +5184,15 @@ function f5_salvarEmpresa(id) {
     var c = r.corpo || {};
     var tid = c.tenant_id || id;
     f5_espelharEmpresa(tid, d, matriz, !id);
-    save(); fecharModal();
-    toast(id ? "Cadastro atualizado no servidor." : "Empresa cadastrada no servidor.", "ok");
-    sincronizarRede(function () { verEmpresa(tid, "empresa"); });
+    f5_atualizarContratoComercial(tid, d, c.contrato_id).then(function () {
+      save(); fecharModal();
+      toast(id ? "Cadastro e condições contratuais atualizados." : "Empresa e contrato cadastrados no servidor.", "ok");
+      sincronizarRede(function () { verEmpresa(tid, "empresa"); });
+    }).catch(function (e) {
+      save(); fecharModal();
+      toast("Empresa salva, mas o contrato não foi atualizado: " + (e.message || "erro no servidor"), "err");
+      sincronizarRede(function () { verEmpresa(tid, "contrato"); });
+    });
   }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 
@@ -4998,8 +5203,8 @@ function f5_confirmarPagamentoInicial(id) {
     nota("Ao confirmar, <b>o servidor</b> cria o ambiente e o acesso do administrador. " +
          "A senha temporaria e gerada la e aparece <b>uma unica vez</b>, na tela seguinte. " +
          "Ninguem escolhe senha aqui.", "wr") +
-    ln("Licenca vitalicia", money(t.licenca ? t.licenca.valor_licenca : 0)) +
-    ln("Manutencao mensal", money(t.licenca ? t.licenca.valor : 0)) +
+    ln("Implantação", money(t.licenca ? t.licenca.valor_licenca : 0)) +
+    ln("Mensalidade", money(t.licenca ? t.licenca.valor : 0)) +
     ln("E-mail do administrador", t.email || "-"),
     '<button class="btn" onclick="fecharModal()">Cancelar</button>' +
     '<button class="btn btn-p btn-g" onclick="confirmarProvisionamento(\'' + id + '\')">Confirmar pagamento e liberar</button>');
