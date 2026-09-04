@@ -1180,13 +1180,13 @@ function auditarSilencioso(acao, antes, depois) {
   });
 }
 function auditar(acao, alvo, detalhe, tid, antes, depois) {
-  DB.logs.push({
-    id: uid("lg"), origem: "console", user_id: Sess ? Sess.user_id : null, nome: me() ? me().nome : "sistema",
-    acao: acao, alvo: alvo || "", detalhe: detalhe || "", tenant_id: tid || null,
-    antes: antes == null ? null : String(antes), depois: depois == null ? null : String(depois),
-    data: new Date().toISOString(), ip: SESSAO.ip, dispositivo: SESSAO.dispositivo
-  });
-  save();
+  var item = { id:uid("lg"), origem:"console", user_id:Sess ? Sess.user_id : null, nome:me() ? me().nome : "sistema",
+    acao:acao, alvo:alvo || "", detalhe:detalhe || "", tenant_id:tid || null,
+    antes:antes == null ? null : String(antes), depois:depois == null ? null : String(depois),
+    data:new Date().toISOString(), ip:SESSAO.ip, dispositivo:SESSAO.dispositivo };
+  DB.logs.push(item); save();
+  if (SUPA_TOKEN) f4_rpc("console_auditar", {p_acao:acao,p_alvo:alvo || "",p_detalhe:detalhe || "",p_tenant:tid || null,
+    p_antes:antes == null ? null : String(antes),p_depois:depois == null ? null : String(depois)}).catch(function(){});
 }
 function logs(f) {
   f = f || {};
@@ -2658,57 +2658,21 @@ function analisar(id) {
   modal("Solicitação de " + esc(t.nome), corpo, rod, true);
 }
 function decidir(id, decisao) {
-  var s = find(DB.solicitacoes, id), t = find(DB.tenants, s.tenant_id);
-  var parecer = v("sl-obs"), valor = nv("sl-valor");
+  var s = find(DB.solicitacoes, id);
+  if (!s) return toast("Solicitação não encontrada.", "err");
+  var parecer = v("sl-obs"), valor = nv("sl-valor"), comp = v("sl-comp") || mesRef(today());
   if (decisao === "negada" && !parecer) return toast("Explique o motivo antes de negar.", "err");
-  s.status = decisao; s.decidida = new Date().toISOString(); s.responsavel = me().nome; s.parecer = parecer;
-  s.historico = s.historico || [];
-  s.historico.push({ data: s.decidida, quem: me().nome, o_que: decisao === "aprovada" ? "aprovou" : "negou", obs: parecer });
-  if (decisao === "aprovada") {
-    var campo = (TIPO_SOL[s.tipo] || {}).campo;
-    if (campo) {
-      t.licenca.extras = t.licenca.extras || {};
-      var antes = t.licenca.extras[campo] || 0;
-      t.licenca.extras[campo] = antes + (s.qtd || 1);
-      auditar("Limite ampliado", t.nome, tipoSol(s.tipo), t.id, antes, t.licenca.extras[campo]);
-    }
-    if (s.tipo === "nova_empresa") {
-      /* aprovar não cria a empresa: libera a vaga. O cadastro e os valores continuam com você */
-      if (vagasRede(t).cheia) {
-        var antesL = limiteEmpresas(t);
-        t.licenca.limites = t.licenca.limites || {};
-        t.licenca.limites.empresas = antesL + 1;
-        auditar("Limite da rede ampliado", t.nome, "de " + antesL + " para " + (antesL + 1) + " empresas", t.id, antesL, antesL + 1);
-      }
-      s.status = "aprovada";
-    }
-    if (s.tipo === "modulo" && s.modulo) {
-      var mods = modulosDaEmpresa(t).slice();
-      if (mods.indexOf(s.modulo) < 0) mods.push(s.modulo);
-      t.licenca.modulos = mods;
-      if (s.modulo === "growth" && !t.growth_desde) t.growth_desde = today();
-      auditar("Módulo liberado por solicitação", modNome(s.modulo), t.nome, t.id);
-    }
-    if (valor > 0) {
-      var comp = v("sl-comp") || mesRef(today());
-      DB.faturas.push({
-        id: uid("f"), tenant_id: t.id, tipo: "servico", competencia: comp,
-        descricao: "Ampliação aprovada · " + tipoSol(s.tipo), valor: valor,
-        venc: comp + "-" + String(Math.min(28, (t.licenca && t.licenca.dia_venc) || 10)).padStart(2, "0"),
-        status: "aberta", pago_em: null, codigo: linhaDigitavel(), criado: today()
+  rpcConsole("console_decidir_solicitacao", { p_id:id, p_decisao:decisao, p_parecer:parecer || "", p_valor:valor || 0, p_competencia:comp })
+    .then(function (r) {
+      var e = f5_erro(r, "O servidor recusou a decisão");
+      if (e) return toast(e, "err");
+      if (!r || !r.corpo || r.corpo.ok !== true) return toast("O servidor não confirmou a decisão.", "err");
+      fecharModal();
+      sincronizarRede(function () {
+        toast(decisao === "aprovada" ? "Solicitação aprovada no servidor." : "Solicitação negada no servidor.", decisao === "aprovada" ? "ok" : "err");
+        ir("solicitacoes");
       });
-      s.status = "aguardando_pagamento";
-      auditar("Cobrança adicional gerada", t.nome, tipoSol(s.tipo) + " · " + money(valor), t.id);
-    }
-  }
-  auditar(decisao === "aprovada" ? "Solicitação aprovada" : "Solicitação negada", t.nome, tipoSol(s.tipo) + (parecer ? " · " + parecer : ""), t.id, "pendente", decisao);
-  save(); fecharModal();
-  if (decisao === "aprovada" && s.tipo === "nova_empresa") {
-    toast("Aprovada. Cadastre a empresa e defina os valores dela.", "ok");
-    return modalEmpresa(null, t.id);
-  }
-  toast(decisao === "aprovada" ? "Aprovada. O limite já vale no ambiente do cliente." : "Solicitação negada.", decisao === "aprovada" ? "ok" : "err");
-  ir("solicitacoes");
+    }).catch(function () { toast("Sem resposta do servidor. A solicitação não foi alterada.", "err"); });
 }
 
 /* =======================================================================
@@ -4536,10 +4500,12 @@ function pg_acessos() {
   setInterval(function () {
     if (!Sess) return;
     atualizarSituacoes(); tocarSessao();
-    /* e o que precisa estar no servidor vai para o servidor. Se nada
-       mudou, isto não faz pedido nenhum — compara e desiste. */
-    publicarTudoSozinho();
-  }, 60000);
+    /* atualização automática: o servidor é a autoridade e o cache local só espelha. */
+    if (!window.__VYOHA_SYNC_BUSY) {
+      window.__VYOHA_SYNC_BUSY = true;
+      f4_sincronizar(function () { window.__VYOHA_SYNC_BUSY = false; });
+    }
+  }, 30000);
 })();
 
 
@@ -5097,7 +5063,6 @@ function f5_excluirEmpresa(id) {
     DB.tenants = DB.tenants.filter(function (x) { return x.id !== id; });
     DB.removidos = DB.removidos || [];
     if (DB.removidos.indexOf(id) < 0) DB.removidos.push(id);
-    try { supaPedido("/rest/v1/ambientes?tenant_id=eq." + encodeURIComponent(id), { method: "DELETE" }); } catch (e) {}
     save(); fecharModal();
     toast(nome + " foi excluida no servidor.", "ok");
     ir("empresas");
