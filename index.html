@@ -2083,12 +2083,18 @@ function emp_financeiro(t) {
 }
 function baixarFatura(id) {
   var f = find(DB.faturas, id);
+  if (!f) return toast("Título não encontrado.", "err");
   confirmar("Confirmar pagamento", "Dar baixa em " + money(f.valor) + " de " + nomeEmpresa(f.tenant_id) + "?", function () {
-    f.status = "paga"; f.pago_em = today();
-    auditar("Pagamento confirmado", nomeEmpresa(f.tenant_id), f.descricao + " · " + money(f.valor), f.tenant_id, "aberta", "paga");
-    var t = find(DB.tenants, f.tenant_id);
-    if (t && t.situacao === "inadimplente" && !diasAtraso(t.id)) t.situacao = "ativa";
-    save(); toast("Pagamento confirmado.", "ok"); ir(View.pg, View.p);
+    var dados = Object.assign({}, f, { status: "paga", pago_em: today(), id: f.id, tenant_id: f.tenant_id });
+    rpcConsole("console_salvar", { colecao: "faturas", registro: dados }).then(function (r) {
+      var e = f5_erro(r, "O servidor recusou a baixa");
+      if (e) return toast(e, "err");
+      f.status = dados.status; f.pago_em = dados.pago_em;
+      var t = find(DB.tenants, f.tenant_id);
+      if (t && t.situacao === "inadimplente" && !diasAtraso(t.id)) t.situacao = "ativa";
+      auditar("Pagamento confirmado", nomeEmpresa(f.tenant_id), f.descricao + " · " + money(f.valor), f.tenant_id, "aberta", "paga");
+      save(); toast("Pagamento confirmado no servidor.", "ok"); ir(View.pg, View.p);
+    }).catch(function () { toast("Sem resposta do servidor. O pagamento não foi alterado.", "err"); });
   }, "Confirmar");
 }
 function emp_usuarios(t) {
@@ -2752,15 +2758,27 @@ function moverEtapa(tid, etapa) {
     return verEmpresa(tid, "empresa");
   }
   var antes = im.etapa;
-  im.etapa = etapa;
-  im.historico.push({ etapa: etapa, data: today(), user_id: Sess.user_id });
+  var novoIm = JSON.parse(JSON.stringify(im));
+  novoIm.etapa = etapa;
+  novoIm.historico = (novoIm.historico || []).concat([{ etapa: etapa, data: today(), user_id: Sess.user_id }]);
+  var novoT = { situacao: t.situacao, status: t.status, implantada: t.implantada };
   if (etapa === "ativa") {
-    t.situacao = "ativa"; t.status = "ativo"; t.implantada = t.implantada || today();
-    im.checklist.forEach(function (c) { c.ok = true; });
-  } else if (SITUACAO[etapa]) t.situacao = etapa;
-  auditar("Etapa da implantação alterada", t.nome, "", t.id, ETAPA_LBL[antes] || antes, ETAPA_LBL[etapa] || etapa);
-  save(); toast(t.nome + " · " + ETAPA_LBL[etapa], "ok");
-  ir(View.pg, View.p);
+    novoT.situacao = "ativa"; novoT.status = "ativo"; novoT.implantada = t.implantada || today();
+    novoIm.checklist = (novoIm.checklist || []).map(function (c) { return Object.assign({}, c, { ok: true }); });
+  } else if (SITUACAO[etapa]) novoT.situacao = etapa;
+  rpcConsole("console_salvar", { colecao: "implantacoes", registro: Object.assign({}, novoIm, { id: im.id, tenant_id: tid }) })
+    .then(function (r) {
+      var e = f5_erro(r, "O servidor recusou a etapa da implantação");
+      if (e) throw new Error(e);
+      return rpcConsole("console_atualizar_empresa", { p_tenant: tid, p_dados: novoT });
+    }).then(function (r2) {
+      var e2 = f5_erro(r2, "O servidor recusou a situação da empresa");
+      if (e2) throw new Error(e2);
+      Object.assign(im, novoIm); Object.assign(t, novoT);
+      auditar("Etapa da implantação alterada", t.nome, "", t.id, ETAPA_LBL[antes] || antes, ETAPA_LBL[etapa] || etapa);
+      save(); toast(t.nome + " · " + ETAPA_LBL[etapa], "ok");
+      ir(View.pg, View.p);
+    }).catch(function (err) { toast(err.message || "Não foi possível salvar a etapa no servidor.", "err"); });
 }
 function abrirImplantacao(tid) {
   var t = find(DB.tenants, tid);
@@ -2802,10 +2820,18 @@ function corpoImplantacao(t, aba) {
 function userNomeConsole(id) { var u = find(DB.users, id); return u ? u.nome : "—"; }
 function marcarChecklist(tid, i) {
   var im = implantacaoDe(tid);
-  im.checklist[i].ok = !im.checklist[i].ok;
-  auditar("Checklist de implantação", nomeEmpresa(tid), im.checklist[i].t + (im.checklist[i].ok ? " concluído" : " reaberto"), tid);
-  save(); recarregarDrawer();
-  if (View.pg === "implantacoes" || (View.p && View.p.aba === "implantacao")) ir(View.pg, View.p);
+  if (!im || !im.checklist || !im.checklist[i]) return;
+  var novoIm = JSON.parse(JSON.stringify(im));
+  novoIm.checklist[i].ok = !novoIm.checklist[i].ok;
+  var item = novoIm.checklist[i].t;
+  rpcConsole("console_salvar", { colecao: "implantacoes", registro: Object.assign({}, novoIm, { id: im.id, tenant_id: tid }) }).then(function (r) {
+    var e = f5_erro(r, "O servidor recusou a alteração do checklist");
+    if (e) return toast(e, "err");
+    im.checklist = novoIm.checklist;
+    auditar("Checklist de implantação", nomeEmpresa(tid), item + (novoIm.checklist[i].ok ? " concluído" : " reaberto"), tid);
+    save(); recarregarDrawer();
+    if (View.pg === "implantacoes" || (View.p && View.p.aba === "implantacao")) ir(View.pg, View.p);
+  }).catch(function () { toast("Sem resposta do servidor. O checklist não foi alterado.", "err"); });
 }
 function salvarImplantacao(tid) {
   var im = implantacaoDe(tid);
@@ -3284,20 +3310,29 @@ function salvarDespesa() {
   var d = v("dp-desc"), val = nv("dp-valor");
   if (!d) return toast("Informe a descrição.", "err");
   if (val <= 0) return toast("Informe um valor maior que zero.", "err");
-  DB.despesas = DB.despesas || [];
-  DB.despesas.push({
-    id: uid("dp"), descricao: d, valor: val, categoria: v("dp-cat"), fornecedor: v("dp-forn"),
-    data: v("dp-data") || today(), fixa: ck("dp-fixa"), user_id: Sess.user_id
-  });
-  auditar("Despesa lançada", d, money(val));
-  save(); fecharModal(); toast("Despesa lançada.", "ok"); ir("financeiro", { tab: "despesas" });
+  var dados = { id: uid("dp"), tenant_id: "vyoha", descricao: d, valor: val, categoria: v("dp-cat"), fornecedor: v("dp-forn"),
+    data: v("dp-data") || today(), fixa: ck("dp-fixa"), user_id: Sess.user_id };
+  rpcConsole("console_salvar", { colecao: "despesas", registro: dados }).then(function (r) {
+    var e = f5_erro(r, "O servidor recusou a despesa");
+    if (e) return toast(e, "err");
+    DB.despesas = DB.despesas || []; DB.despesas.push(dados);
+    auditar("Despesa lançada", d, money(val));
+    save(); fecharModal(); toast("Despesa lançada no servidor.", "ok"); ir("financeiro", { tab: "despesas" });
+  }).catch(function () { toast("Sem resposta do servidor. A despesa não foi lançada.", "err"); });
 }
 function excluirDespesa(id) {
   var d = (DB.despesas || []).filter(function (x) { return x.id === id; })[0];
+  if (!d) return toast("Despesa não encontrada.", "err");
   confirmar("Excluir lançamento", "Remover " + esc(d.descricao) + " de " + money(d.valor) + "?", function () {
-    DB.despesas = DB.despesas.filter(function (x) { return x.id !== id; });
-    auditar("Despesa excluída", d.descricao, money(d.valor));
-    save(); toast("Lançamento removido.", "ok"); ir("financeiro", { tab: "despesas" });
+    /* console_salvar não oferece DELETE: marcamos o registro como excluído para manter rastreabilidade. */
+    var dados = Object.assign({}, d, { excluida: true, excluida_em: new Date().toISOString(), id: d.id, tenant_id: d.tenant_id || "vyoha" });
+    rpcConsole("console_salvar", { colecao: "despesas", registro: dados }).then(function (r) {
+      var e = f5_erro(r, "O servidor recusou a exclusão");
+      if (e) return toast(e, "err");
+      DB.despesas = DB.despesas.filter(function (x) { return x.id !== id; });
+      auditar("Despesa excluída", d.descricao, money(d.valor));
+      save(); toast("Lançamento removido.", "ok"); ir("financeiro", { tab: "despesas" });
+    }).catch(function () { toast("Sem resposta do servidor. A despesa não foi alterada.", "err"); });
   }, "Excluir", true);
 }
 function exportarReceitas() {
@@ -3468,21 +3503,34 @@ function corpoChamado(t, aba) {
 }
 function responderChamado(id) {
   var t = find(DB.tickets, id), txt = el("ch-txt").value.trim();
+  if (!t) return toast("Chamado não encontrado.", "err");
   if (!txt) return toast("Escreva a resposta.", "err");
-  t.msgs = t.msgs || [];
-  t.msgs.push({ lado: "vyoha", autor: me().nome, txt: txt, data: new Date().toISOString(), lida_empresa: false });
-  if (!t.primeira_resposta) t.primeira_resposta = new Date().toISOString();
-  if (t.status === "aberto") t.status = "em_atendimento";
-  auditar("Resposta em chamado", nomeEmpresa(t.tenant_id), t.assunto, t.tenant_id);
-  save(); recarregarDrawer(); toast("Resposta enviada.", "ok");
-  if (View.pg === "suporte") ir("suporte");
+  var novo = JSON.parse(JSON.stringify(t));
+  novo.msgs = novo.msgs || [];
+  novo.msgs.push({ lado: "vyoha", autor: me().nome, txt: txt, data: new Date().toISOString(), lida_empresa: false });
+  if (!novo.primeira_resposta) novo.primeira_resposta = new Date().toISOString();
+  if (novo.status === "aberto") novo.status = "em_atendimento";
+  rpcConsole("console_salvar", { colecao: "tickets", registro: Object.assign({}, novo, { id: novo.id, tenant_id: novo.tenant_id }) }).then(function (r) {
+    var e = f5_erro(r, "O servidor recusou a resposta");
+    if (e) return toast(e, "err");
+    Object.assign(t, novo);
+    auditar("Resposta em chamado", nomeEmpresa(t.tenant_id), t.assunto, t.tenant_id);
+    save(); recarregarDrawer(); toast("Resposta enviada ao servidor.", "ok");
+    if (View.pg === "suporte") ir("suporte");
+  }).catch(function () { toast("Sem resposta do servidor. A resposta não foi enviada.", "err"); });
 }
 function resolverChamado(id) {
   var t = find(DB.tickets, id);
+  if (!t) return toast("Chamado não encontrado.", "err");
   confirmar("Resolver chamado", "Marcar “" + esc(t.assunto) + "” como resolvido?", function () {
-    t.status = "resolvido"; t.resolvido_em = new Date().toISOString();
-    auditar("Chamado resolvido", nomeEmpresa(t.tenant_id), t.assunto, t.tenant_id);
-    save(); fecharDrawer(); toast("Chamado resolvido.", "ok"); ir("suporte");
+    var novo = Object.assign({}, t, { status: "resolvido", resolvido_em: new Date().toISOString(), id: t.id, tenant_id: t.tenant_id });
+    rpcConsole("console_salvar", { colecao: "tickets", registro: novo }).then(function (r) {
+      var e = f5_erro(r, "O servidor recusou a resolução");
+      if (e) return toast(e, "err");
+      t.status = novo.status; t.resolvido_em = novo.resolvido_em;
+      auditar("Chamado resolvido", nomeEmpresa(t.tenant_id), t.assunto, t.tenant_id);
+      save(); fecharDrawer(); toast("Chamado resolvido no servidor.", "ok"); ir("suporte");
+    }).catch(function () { toast("Sem resposta do servidor. O chamado não foi alterado.", "err"); });
   }, "Resolver");
 }
 
@@ -4932,8 +4980,9 @@ function f5_confirmarPagamentoInicial(id) {
 }
 
 function f5_publicarFaturas(tid) {
-  (DB.faturas || []).filter(function (f) { return f.tenant_id === tid; })
-    .forEach(function (f) { try { salvarNaRede("faturas", f); } catch (e) {} });
+  return Promise.all((DB.faturas || []).filter(function (f) { return f.tenant_id === tid; }).map(function (f) {
+    return rpcConsole("console_salvar", { colecao: "faturas", registro: Object.assign({}, f, { id: f.id, tenant_id: tid }) });
+  }));
 }
 
 function f5_confirmarProvisionamento(id) {
@@ -4956,12 +5005,16 @@ function f5_confirmarProvisionamento(id) {
       }
       F5_ENTREGA[id] = { email: c.email, senha: c.senha_temporaria || null, token: c.token };
       try { gerarFaturas(t); } catch (e) {}
-      f5_publicarFaturas(id);
-      try { publicarAmbienteConsole(t); } catch (e) {}
-      save();
-      fecharModal();
-      f5_modalEntrega(id);
-      sincronizarRede(function () {});
+      f5_publicarFaturas(id).then(function () {
+        try { publicarAmbienteConsole(t); } catch (e) {}
+        save();
+        fecharModal();
+        f5_modalEntrega(id);
+        sincronizarRede(function () {});
+      }).catch(function () {
+        toast("Ambiente criado, mas não foi possível publicar os títulos financeiros no servidor. Nada será apresentado como concluído até a sincronização.", "err");
+        sincronizarRede(function () {});
+      });
     }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
 
