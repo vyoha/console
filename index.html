@@ -450,24 +450,16 @@ function marcaVyoha(size, arrowColor) {
     "</svg>";
 }
 var KEY = "vyoha_db_v3", SKEY = "vyoha_sess_v3", mem = {};
+/* ARQUITETURA SERVER-AUTHORITATIVE:
+   o navegador mantém somente estado transitório em memória durante a sessão.
+   Nenhum dado operacional do Console é persistido em localStorage. */
 var Store = {
-  get: function (k) { try { var x = localStorage.getItem(k); return x === null ? (k in mem ? mem[k] : null) : x; } catch (e) { return k in mem ? mem[k] : null; } },
-  /* devolve false quando o navegador recusa gravar — o console também
-     não pode perder trabalho em silêncio */
-  set: function (k, x) { mem[k] = x; try { localStorage.setItem(k, x); return true; } catch (e) { return false; } },
-  del: function (k) { delete mem[k]; try { localStorage.removeItem(k); } catch (e) {} }
+  get: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
+  set: function (k, x) { mem[k] = x; return true; },
+  del: function (k) { delete mem[k]; }
 };
-var GRAVACAO_FALHOU = false;
-function save() {
-  var deu = Store.set(KEY, JSON.stringify(DB));
-  if (!deu && !GRAVACAO_FALHOU) {
-    GRAVACAO_FALHOU = true;
-    try { toast("O navegador recusou gravar — o espaço acabou. O que você fizer agora não será guardado.", "err"); } catch (e) {}
-  }
-  if (deu) GRAVACAO_FALHOU = false;
-  return deu;
-}
-function load() { var r = Store.get(KEY); if (r) { try { var d = JSON.parse(r); if (d && d.v === 3) { DB = d; return true; } } catch (e) {} } return false; }
+function save() { return true; }
+function load() { return false; }
 var _n = 0;
 function uid(p) { _n++; return p + Date.now().toString(36) + _n.toString(36) + Math.floor(Math.random() * 1e4).toString(36); }
 function el(id) { return document.getElementById(id); }
@@ -1507,11 +1499,11 @@ function iniciar() {
   if (!supaAutenticado() && sessaoSupaGuardada()) {
     religarSupabase(function (ok) {
       if (!ok) return;
-      publicarTudoSozinho();
+      f4_sincronizar();
       if (View.pg) ir(View.pg, View.p);
     });
   } else if (supaAutenticado()) {
-    publicarTudoSozinho();
+    f4_sincronizar();
   }
   ir("exec");
 }
@@ -2316,7 +2308,6 @@ function provisionar(t, senhaEscolhida) {
   /* e o servidor passa a saber quem é esta empresa e de qual rede */
   registrarEmpresaNuvem(t);
   /* o ambiente vai junto: o cliente entra do computador dele no mesmo dia */
-  publicarAmbienteConsole(t);
   gerarFaturas(t);
   var im = implantacaoDe(t.id) || (DB.implantacoes.push(novaImplantacao(t, false)), implantacaoDe(t.id));
   im.etapa = "implantacao";
@@ -3658,7 +3649,6 @@ function supaAutenticado() { return !!SUPA_TOKEN && Date.now() < SUPA_EXP; }
 function supaSair() {
   SUPA_TOKEN = null; SUPA_EXP = 0; SUPA_USER = "";
   esquecerSessaoSupa();
-  try { Store.del(K_MAPA_ENVIADO); } catch (e) {}
   auditar("Console desconectado do servidor", "", "");
   ir("acessos");
 }
@@ -3690,7 +3680,7 @@ function supaEntrar(volta) {
     .then(function (x) {
       if (!x.ok || !x.j.access_token) return bad(x.j.error_description || x.j.msg || "Não foi possível entrar. Confira o e-mail e a senha.");
       guardarSessaoSupa(x.j, mail);
-      publicarTudoSozinho();
+      f4_sincronizar();
       ir(volta || "leads");
     }).catch(function () { bad("Sem resposta do Supabase. Verifique a URL do projeto e a sua internet."); });
 }
@@ -4147,137 +4137,9 @@ function pintarCopias() {
   }).join("");
 }
 
-/* ---------------- o ambiente publicado na liberação ----------------
-   O cliente precisa conseguir entrar do computador dele, que nunca
-   viu este sistema. Para isso o ambiente tem que existir no servidor
-   ANTES do primeiro acesso — e quem tem esses dados na mão, na hora
-   de liberar a empresa, é o console. Senha nenhuma vai no pacote. */
-var SEGREDOS_AMB = ["senha", "senha_hash", "salt", "senha_em", "provisoria", "tentativas", "bloqueio_ate", "bloqueado_ate", "acesso"];
-function semSegredosConsole(u) {
-  var c = {};
-  for (var k in u) if (u.hasOwnProperty(k) && SEGREDOS_AMB.indexOf(k) < 0) c[k] = u[k];
-  return c;
-}
-function pacoteAmbienteConsole(t) {
-  if (!t) return null;
-  return {
-    tenant: t,
-    config: DB.config.filter(function (x) { return x.tenant_id === t.id; })[0] || null,
-    users: DB.users.filter(function (u) { return u.tenant_id === t.id; }).map(semSegredosConsole)
-  };
-}
-function publicarAmbienteConsole(t, depois) {
-  if (!supaConfigurado() || !supaAutenticado() || !t) return depois && depois(false);
-  var p = pacoteAmbienteConsole(t);
-  if (!p) return depois && depois(false);
-  supaPedido("/rest/v1/ambientes", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify({ tenant_id: t.id, dados: p })
-  }).then(function (r) { if (depois) depois(r.ok); })
-    .catch(function () { if (depois) depois(false); });
-}
-function publicarAmbientesTodos() {
-  if (!supaConfigurado() || !supaAutenticado()) return toast("Conecte a sua conta do Supabase nesta tela primeiro.", "err");
-  var lista = DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; });
-  if (!lista.length) return toast("Nenhuma empresa liberada ainda.", "err");
-  var corpo = lista.map(function (t) { return { tenant_id: t.id, dados: pacoteAmbienteConsole(t) }; });
-  supaPedido("/rest/v1/ambientes", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(corpo)
-  }).then(function (r) {
-    if (!r.ok) return toast("O Supabase recusou o envio (" + r.status + ").", "err");
-    auditar("Ambientes publicados", lista.length + " empresa(s)", "");
-    save(); toast(lista.length + " ambiente(s) prontos para o primeiro acesso.", "ok");
-  }).catch(function () { toast("Sem resposta do Supabase.", "err"); });
-}
-
-/* ---------------- o mapa da rede no servidor ----------------
-   Quem é matriz de quem não pode ser decidido pelo navegador do
-   cliente. O console publica esse mapa; é ele que o servidor usa
-   para somar os números que o gestor da rede recebe. */
-/* o administrador da empresa: é o único e-mail que consegue refazer
-   o próprio vínculo pelo token quando não há ambiente publicado */
-function adminDaEmpresa(t) {
-  var l = DB.users.filter(function (u) {
-    return u.tenant_id === t.id && u.status !== "inativo" &&
-      (u.perfil === "admin" || u.perfil === "holding");
-  });
-  return l[0] ? String(l[0].email || "").toLowerCase() : null;
-}
-function linhaEmpresaNuvem(t) {
-  return {
-    tenant_id: t.id, nome: t.nome, matriz_id: t.matriz_id || null,
-    ativo: t.status === "ativo",
-    token: t.token || null, email_admin: adminDaEmpresa(t)
-  };
-}
-function registrarEmpresaNuvem(t, depois) {
-  if (!supaConfigurado() || !supaAutenticado() || !t) return depois && depois(false);
-  supaPedido("/rest/v1/empresas", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(linhaEmpresaNuvem(t))
-  }).then(function (r) { if (depois) depois(r.ok); })
-    .catch(function () { if (depois) depois(false); });
-}
-function publicarMapaDaRede() {
-  if (!supaConfigurado() || !supaAutenticado()) return toast("Conecte a sua conta do Supabase nesta tela primeiro.", "err");
-  var lista = DB.tenants.filter(function (t) { return t.id !== "vyoha"; }).map(linhaEmpresaNuvem);
-  if (!lista.length) return toast("Nenhuma empresa cadastrada ainda.", "err");
-  supaPedido("/rest/v1/empresas", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(lista)
-  }).then(function (r) {
-    if (!r.ok) return toast("O Supabase recusou o envio (" + r.status + ").", "err");
-    auditar("Mapa da rede publicado", lista.length + " empresa(s)", "");
-    save(); toast(lista.length + " empresa(s) no mapa do servidor.", "ok");
-  }).catch(function () { toast("Sem resposta do Supabase.", "err"); });
-}
-
-/* ---------------- publicar deixou de ser tarefa de alguém ----------------
-   Publicar o mapa e os ambientes nunca foi uma decisão: é só o que
-   precisa estar lá para o cliente conseguir entrar. Então acontece
-   sozinho, sempre que o console está conectado e alguma coisa mudou.
-   Os botões continuam existindo para forçar na hora — mas ninguém
-   precisa lembrar deles. */
-var K_MAPA_ENVIADO = "vyoha_mapa_enviado";
-function retratoDaRede() {
-  return JSON.stringify(DB.tenants.filter(function (t) { return t.id !== "vyoha"; })
-    .map(function (t) {
-      var l = linhaEmpresaNuvem(t);
-      return [l.tenant_id, l.nome, l.matriz_id, l.ativo, l.token, l.email_admin,
-        DB.users.filter(function (u) { return u.tenant_id === t.id; })
-          .map(function (u) { return u.id + ":" + u.email + ":" + u.perfil + ":" + u.status; }).join(",")].join("|");
-    }).sort());
-}
-function publicarTudoSozinho() {
-  if (!supaConfigurado() || !supaAutenticado()) return;
-  var agora = retratoDaRede();
-  if (Store.get(K_MAPA_ENVIADO) === agora) return;
-  var empresasLinhas = DB.tenants.filter(function (t) { return t.id !== "vyoha"; }).map(linhaEmpresaNuvem);
-  if (!empresasLinhas.length) return;
-  supaPedido("/rest/v1/empresas", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(empresasLinhas)
-  }).then(function (r) {
-    if (!r.ok) return;
-    var amb = DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; })
-      .map(function (t) { return { tenant_id: t.id, dados: pacoteAmbienteConsole(t) }; });
-    if (!amb.length) { try { Store.set(K_MAPA_ENVIADO, agora); } catch (e) {} return; }
-    supaPedido("/rest/v1/ambientes", {
-      method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify(amb)
-    }).then(function (r2) {
-      if (r2.ok) { try { Store.set(K_MAPA_ENVIADO, agora); } catch (e) {} }
-    }).catch(function () {});
-  }).catch(function () {});
-}
-
+/* ---------------- ambiente e rede: servidor ----------------
+   Ambiente, rede e demais dados são lidos/escritos no Supabase.
+   Não existe publicação do estado local. */
 /* ---------------- acesso na nuvem criado sozinho ----------------
    Ao provisionar a empresa, a conta de acesso do administrador dela
    nasce no Supabase junto com o ambiente. Você não abre o painel. */
@@ -4448,21 +4310,18 @@ function pg_acessos() {
         "A conta já existia lá com outra senha, e o servidor recusou a troca. " +
         "Quase sempre é a função <b>redefinir-senha</b> desatualizada — republique em Edge Functions e tente de novo.", "wr");
   }
-  /* publicar deixou de ser tarefa de alguém: acontece ao abrir o console
-     e a cada minuto, quando alguma coisa muda. Os botões continuam para
-     forçar na hora — mas ninguém precisa lembrar deles. */
-  var emDia = Store.get(K_MAPA_ENVIADO) === retratoDaRede();
+  /* O servidor é a autoridade. Esta tela apenas consulta o estado atual. */
+  var emDia = CONSOLE_ESTADO.servidor === "ok" && !!CONSOLE_ESTADO.ultima_sincronizacao;
   h += '<div style="height:14px"></div>' +
     box("O que está no servidor", '<div class="box-b">' +
       nota(emDia
-        ? "<b>Tudo publicado.</b> O mapa das empresas e os ambientes no servidor estão iguais ao que existe aqui."
-        : "<b>Tem coisa para subir.</b> Vai sozinho em instantes — o console verifica ao abrir e a cada 30 segundos, " +
-          "sempre que alguma coisa muda. Se quiser não esperar, use o botão.", emDia ? "ok" : "wr") +
+        ? "<b>Servidor conectado.</b> Os dados exibidos foram consultados do Supabase."
+        : "<b>Servidor não confirmado.</b> O console tentará consultar novamente o Supabase automaticamente.", emDia ? "ok" : "wr") +
       '<div class="sm mut" style="margin:12px 0">O <b>mapa</b> diz ao servidor quais empresas somar para cada gestor de rede, ' +
       "e leva o token e o e-mail do dono — é isso que permite um acesso perdido se religar sozinho. " +
       "O <b>ambiente</b> é o que deixa o cliente entrar de um computador que nunca viu o sistema. " +
       "Senha nenhuma vai em nenhum dos dois.</div>" +
-      '<button class="btn" onclick="publicarMapaDaRede();publicarAmbientesTodos()">Publicar agora</button>' +
+      '<button class="btn" onclick="forcarSincronizacaoConsole()">Sincronizar agora</button>' +
       '<button class="btn" style="margin-left:8px" onclick="criarAcessosQueFaltam()">Criar os acessos que faltam</button>' +
       '<button class="btn btn-s" style="margin-left:8px" onclick="supaSair()">Desconectar do Supabase</button></div>');
   setTimeout(carregarCopiasVyoha, 0);
@@ -4496,14 +4355,6 @@ function consolePodeOperar(acao) {
 (function () {
   if (!load()) seedConsole();
   if (!Array.isArray(DB.removidos)) DB.removidos = [];
-  /* o console também divide o banco com as outras abas: sem escutar as
-     mudanças, a aba antiga apaga o que a nova cadastrou */
-  if (typeof window.addEventListener === "function") {
-    window.addEventListener("storage", function (e) {
-      if (!e || e.key !== KEY) return;
-      try { if (load() && Sess && View.pg) ir(View.pg, View.p); } catch (err) {}
-    });
-  }
   migrar();
   migrarSenhas();
   var trocados = renovarTokensVencidos();
@@ -4599,6 +4450,7 @@ function f4_entrar(mail, senha) {
 }
 
 function f4_esquecer_servidor() {
+  try { vyohaRtParar(); } catch (e) {}
   try { SUPA_TOKEN = null; SUPA_EXP = 0; SUPA_USER = ""; esquecerSessaoSupa(); } catch (e) {}
   F4_IDENT = null;
 }
@@ -4727,6 +4579,7 @@ function f4_abrir(ident) {
   var err = el("cs-err"); if (err) err.classList.add("hidden");
   iniciar();
   f4_marca("dentro");
+  vyohaRtIniciar();
   f4_sincronizar(function () { try { if (View.pg) ir(View.pg, View.p); } catch (e) {} });
   if (ident.trocar_senha) { try { trocaObrigatoria(); } catch (e) {} }
 }
@@ -4743,6 +4596,7 @@ function f4_doLogin() {
       return;
     }
     guardarSessaoSupa(x.j, mail);
+    vyohaRtIniciar();
     return f4_rpc("meu_acesso").then(function (r) {
       var ident = r.corpo || {};
       if (!ident.ok || ident.perfil !== "vyoha") {
@@ -4804,6 +4658,7 @@ function f4_salvarTroca() {
 }
 
 function f4_sair() {
+  try { vyohaRtParar(); } catch (e) {}
   try { if (Sess) { encerrarSessao(Sess.sess_id, "logout"); } } catch (e) {}
   Sess = null;
   try { Store.del(CKEY); } catch (e) {}
@@ -4855,6 +4710,31 @@ window.gerarAcessoEmergencia = gerarAcessoEmergencia;
 window.identidadeDoServidor = function () { return F4_IDENT; };
 window.rpcConsole = f4_rpc;
 window.sincronizarRede = f4_sincronizar;
+/* ===============================================================
+   VYOHA CONSOLE · REALTIME VERDADEIRO
+   O polling de 30s permanece como fallback. Apos autenticacao,
+   o navegador abre um canal Supabase Realtime para as tabelas
+   que alimentam o Console.
+   =============================================================== */
+var VYOHA_RT = { ws: null, timer: null, heartbeat: null, ref: 0, tentativas: 0, conectado: false };
+var VYOHA_RT_TABELAS = ["empresas","faturas","contratos","implantacoes","planos","solicitacoes","tickets","despesas","auditoria"];
+function vyohaRtUrl() { var c = supaCfg(); return c.url.replace(/^http/i, "ws") + "/realtime/v1/websocket?apikey=" + encodeURIComponent(c.key) + "&vsn=1.0.0"; }
+function vyohaRtEnviar(msg) { if (VYOHA_RT.ws && VYOHA_RT.ws.readyState === 1) { VYOHA_RT.ws.send(JSON.stringify(msg)); return true; } return false; }
+function vyohaRtFechar() { try { if (VYOHA_RT.heartbeat) clearInterval(VYOHA_RT.heartbeat); } catch (e) {} VYOHA_RT.heartbeat=null; try { if (VYOHA_RT.ws) VYOHA_RT.ws.close(); } catch (e) {} VYOHA_RT.ws=null; VYOHA_RT.conectado=false; }
+function vyohaRtAgendar() { try { if (VYOHA_RT.timer) clearTimeout(VYOHA_RT.timer); } catch (e) {} if (!supaAutenticado()) return; var atraso=Math.min(30000,Math.max(3000,2000*Math.pow(2,VYOHA_RT.tentativas||0))); VYOHA_RT.timer=setTimeout(vyohaRtConectar,atraso); }
+function vyohaRtSincronizar() { if (window.__VYOHA_RT_SYNCING) return; window.__VYOHA_RT_SYNCING=true; f4_sincronizar(function(){window.__VYOHA_RT_SYNCING=false;}); }
+function vyohaRtConectar() {
+  if (!supaConfigurado() || !supaAutenticado() || typeof WebSocket === "undefined") return;
+  vyohaRtFechar(); var ws; try { ws=new WebSocket(vyohaRtUrl()); } catch(e){ vyohaRtAgendar(); return; } VYOHA_RT.ws=ws;
+  ws.onopen=function(){ VYOHA_RT.tentativas=0; var changes=VYOHA_RT_TABELAS.map(function(t){return {event:"*",schema:"public",table:t};}); vyohaRtEnviar({topic:"realtime:console",event:"phx_join",payload:{config:{broadcast:{self:false},presence:{key:"console"},postgres_changes:changes,private:false},access_token:SUPA_TOKEN},ref:String(++VYOHA_RT.ref)}); VYOHA_RT.heartbeat=setInterval(function(){vyohaRtEnviar({topic:"phoenix",event:"heartbeat",payload:{},ref:String(++VYOHA_RT.ref)});},25000); };
+  ws.onmessage=function(ev){ var m=null; try{m=JSON.parse(ev.data);}catch(e){return;} if(m.event==="phx_reply"&&m.payload&&m.payload.status==="ok"){VYOHA_RT.conectado=true;return;} if(m.event==="postgres_changes"){VYOHA_RT.conectado=true;vyohaRtSincronizar();} if(m.event==="phx_error"||m.event==="phx_close"){VYOHA_RT.conectado=false;vyohaRtAgendar();} };
+  ws.onerror=function(){VYOHA_RT.conectado=false;};
+  ws.onclose=function(){VYOHA_RT.conectado=false;try{if(VYOHA_RT.heartbeat)clearInterval(VYOHA_RT.heartbeat);}catch(e){}VYOHA_RT.heartbeat=null;VYOHA_RT.tentativas=Math.min(4,(VYOHA_RT.tentativas||0)+1);vyohaRtAgendar();};
+}
+function vyohaRtIniciar(){try{if(VYOHA_RT.timer)clearTimeout(VYOHA_RT.timer);}catch(e){}VYOHA_RT.tentativas=0;if(supaAutenticado())vyohaRtConectar();}
+function forcarSincronizacaoConsole(){ f4_sincronizar(function(ok){ consoleEstadoServidor(ok ? "ok" : "erro", ok ? "" : "Falha ao sincronizar."); toast(ok ? "Servidor sincronizado." : "Falha ao sincronizar.", ok ? "ok" : "err"); }); }
+function vyohaRtParar(){vyohaRtFechar();try{if(VYOHA_RT.timer)clearTimeout(VYOHA_RT.timer);}catch(e){}VYOHA_RT.timer=null;}
+
 window.salvarNaRede = function (colecao, registro, depois) {
   return f4_rpc("console_salvar", { colecao: colecao, registro: registro })
     .then(function (r) {
@@ -5047,7 +4927,6 @@ function f5_confirmarProvisionamento(id) {
       F5_ENTREGA[id] = { email: c.email, senha: c.senha_temporaria || null, token: c.token };
       try { gerarFaturas(t); } catch (e) {}
       f5_publicarFaturas(id).then(function () {
-        try { publicarAmbienteConsole(t); } catch (e) {}
         save();
         fecharModal();
         f5_modalEntrega(id);
@@ -5173,27 +5052,8 @@ criarContaNuvemConsole = function (email, senha, tenantId, papel, nome, depois) 
   if (depois) depois(false, "O acesso do cliente e criado pelo servidor.");
 };
 registrarEmpresaNuvem = function (t, depois) { if (depois) depois(true); };
-publicarMapaDaRede = function () {
-  toast("O mapa da rede ja vive no servidor. Nao ha o que publicar.", "ok");
-};
-publicarTudoSozinho = function () {
-  if (!supaConfigurado() || typeof SUPA_TOKEN === "undefined" || !SUPA_TOKEN) return;
-  var liberadas = DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; });
-  if (!liberadas.length) return;
-  var agora = retratoDaRede();
-  if (Store.get(K_MAPA_ENVIADO) === agora) return;
-  supaPedido("/rest/v1/ambientes", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(liberadas.map(function (t) {
-      return { tenant_id: t.id, dados: pacoteAmbienteConsole(t) };
-    }))
-  }).then(function (r) {
-    if (r.ok) { try { Store.set(K_MAPA_ENVIADO, agora); } catch (e) {} }
-  }).catch(function () {});
-};
 provisionar = function () {
-  toast("A liberacao do ambiente passou a ser feita pelo servidor.", "err");
+  toast("A liberação do ambiente é feita pelo servidor.", "err");
 };
 
 salvarEmpresa = f5_salvarEmpresa;
@@ -5209,13 +5069,12 @@ window.modalCredenciais = modalCredenciais;
 window.excluirEmpresa = excluirEmpresa;
 window.criarContaNuvemConsole = criarContaNuvemConsole;
 window.registrarEmpresaNuvem = registrarEmpresaNuvem;
-window.publicarMapaDaRede = publicarMapaDaRede;
-window.publicarTudoSozinho = publicarTudoSozinho;
 window.provisionar = provisionar;
 window.f5_copiarEntrega = f5_copiarEntrega;
 window.f5_novaSenha = f5_novaSenha;
 window.f5_modalEntrega = f5_modalEntrega;
 window.sincronizarRede = f5_sincronizar;
+/* Sincronizar = somente consultar novamente o servidor; nunca publicar cache local. */
 
 try { document.body.setAttribute("data-f5", "ativa"); } catch (e) {}
 
