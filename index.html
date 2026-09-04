@@ -450,16 +450,24 @@ function marcaVyoha(size, arrowColor) {
     "</svg>";
 }
 var KEY = "vyoha_db_v3", SKEY = "vyoha_sess_v3", mem = {};
-/* ARQUITETURA SERVER-AUTHORITATIVE:
-   o navegador mantém somente estado transitório em memória durante a sessão.
-   Nenhum dado operacional do Console é persistido em localStorage. */
 var Store = {
-  get: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
-  set: function (k, x) { mem[k] = x; return true; },
-  del: function (k) { delete mem[k]; }
+  get: function (k) { try { var x = localStorage.getItem(k); return x === null ? (k in mem ? mem[k] : null) : x; } catch (e) { return k in mem ? mem[k] : null; } },
+  /* devolve false quando o navegador recusa gravar — o console também
+     não pode perder trabalho em silêncio */
+  set: function (k, x) { mem[k] = x; try { localStorage.setItem(k, x); return true; } catch (e) { return false; } },
+  del: function (k) { delete mem[k]; try { localStorage.removeItem(k); } catch (e) {} }
 };
-function save() { return true; }
-function load() { return false; }
+var GRAVACAO_FALHOU = false;
+function save() {
+  var deu = Store.set(KEY, JSON.stringify(DB));
+  if (!deu && !GRAVACAO_FALHOU) {
+    GRAVACAO_FALHOU = true;
+    try { toast("O navegador recusou gravar — o espaço acabou. O que você fizer agora não será guardado.", "err"); } catch (e) {}
+  }
+  if (deu) GRAVACAO_FALHOU = false;
+  return deu;
+}
+function load() { var r = Store.get(KEY); if (r) { try { var d = JSON.parse(r); if (d && d.v === 3) { DB = d; return true; } } catch (e) {} } return false; }
 var _n = 0;
 function uid(p) { _n++; return p + Date.now().toString(36) + _n.toString(36) + Math.floor(Math.random() * 1e4).toString(36); }
 function el(id) { return document.getElementById(id); }
@@ -551,13 +559,13 @@ function gerarFaturas(t) {
   if (!DB.faturas.filter(function (f) { return f.tenant_id === t.id && f.tipo === "licenca"; }).length && t.licenca.valor_licenca) {
     DB.faturas.push({
       id: uid("f"), tenant_id: t.id, tipo: "licenca", competencia: compIni,
-      descricao: "Licença vitalícia · plano " + ((PLANOS[t.licenca.plano] || {}).nome || ""),
+      descricao: "Implantação · plano " + ((PLANOS[t.licenca.plano] || {}).nome || ""),
       valor: t.licenca.valor_licenca, venc: t.licenca.inicio,
       status: t.licenca.pagamento_inicial ? "paga" : (dt(t.licenca.inicio) < dt(today()) ? "vencida" : "aberta"),
       pago_em: t.licenca.pagamento_inicial ? t.licenca.inicio : null, codigo: linhaDigitavel(), criado: t.licenca.inicio
     });
   }
-  /* taxa mensal de manutenção */
+  /* mensalidade */
   var comp = compIni, n = 0;
   while (comp <= limite && n < 48) {
     if (!DB.faturas.filter(function (f) { return f.tenant_id === t.id && f.tipo === "manutencao" && f.competencia === comp; }).length) {
@@ -566,7 +574,7 @@ function gerarFaturas(t) {
       var paga = comp > atual ? false : (comp === compIni ? !!t.licenca.pagamento_inicial : true);
       DB.faturas.push({
         id: uid("f"), tenant_id: t.id, tipo: "manutencao", competencia: comp,
-        descricao: "Taxa de manutenção · plano " + ((PLANOS[t.licenca.plano] || {}).nome || ""),
+        descricao: "Mensalidade · plano " + ((PLANOS[t.licenca.plano] || {}).nome || ""),
         valor: t.licenca.valor, venc: venc,
         status: paga ? "paga" : (dt(venc) < dt(today()) ? "vencida" : "aberta"),
         pago_em: paga ? venc : null, codigo: linhaDigitavel(), criado: comp + "-01"
@@ -1079,7 +1087,7 @@ function modulosDaEmpresa(t) {
   return (t && t.licenca && t.licenca.modulos && t.licenca.modulos.length) ? t.licenca.modulos : MODULOS_PADRAO.slice();
 }
 function resumoLicenca(t) {
-  if (!t.licenca) return "sem licença registrada";
+  if (!t.licenca) return "sem implantação registrada";
   return money(t.licenca.valor_licenca || 0) + " · " + money(t.licenca.valor || 0) + "/mês";
 }
 function usoLicenca(t) {
@@ -1102,6 +1110,7 @@ function registrosDaEmpresa(tid) {
 }
 
 /* ---------- indicadores por empresa ---------- */
+function rotuloFinanceiro(txt) { return String(txt || "").replace(/Licença vitalícia/gi, "Implantação").replace(/Taxa de manutenção/gi, "Mensalidade").replace(/Manutenção/gi, "Mensalidade").replace(/Licença/gi, "Implantação"); }
 function faturasDe(tid) { return DB.faturas.filter(function (f) { return f.tenant_id === tid; }); }
 function receitaGerada(tid) { return r2(sum(faturasDe(tid).filter(function (f) { return f.status === "paga"; }), function (f) { return f.valor; })); }
 function emAberto(tid) { return faturasDe(tid).filter(function (f) { return f.status !== "paga"; }); }
@@ -1136,7 +1145,7 @@ function usoPlataforma(tid) {
 function risco(t) {
   /* risco de cancelamento, por regras sobre os dados reais */
   var m = [], d = diasSemAcesso(t.id), at = diasAtraso(t.id), u = usoPlataforma(t.id);
-  if (at >= 30) m.push(at + " dias de atraso na manutenção");
+  if (at >= 30) m.push(at + " dias de atraso na mensalidade");
   if (d >= 21) m.push(d === 999 ? "nunca acessou" : "sem acesso há " + d + " dias");
   if (u < 20) m.push("uso baixo da plataforma");
   if (t.situacao === "suspensa") m.push("ambiente suspenso");
@@ -1499,11 +1508,11 @@ function iniciar() {
   if (!supaAutenticado() && sessaoSupaGuardada()) {
     religarSupabase(function (ok) {
       if (!ok) return;
-      f4_sincronizar();
+      publicarTudoSozinho();
       if (View.pg) ir(View.pg, View.p);
     });
   } else if (supaAutenticado()) {
-    f4_sincronizar();
+    publicarTudoSozinho();
   }
   ir("exec");
 }
@@ -1645,7 +1654,7 @@ function alertas() {
     if (d >= DB.global.dias_suspensao && t.situacao !== "suspensa" && t.situacao !== "cancelada")
       a.push({ n: "critico", t: t.nome + " passou de " + DB.global.dias_suspensao + " dias de inadimplência", a: "verEmpresa('" + t.id + "','financeiro')", b: "Analisar suspensão" });
     else if (d > 0 && t.situacao !== "cancelada")
-      a.push({ n: "aviso", t: t.nome + " está com " + d + " dias de atraso na manutenção", a: "verEmpresa('" + t.id + "','financeiro')", b: "Abrir financeiro" });
+      a.push({ n: "aviso", t: t.nome + " está com " + d + " dias de atraso na mensalidade", a: "verEmpresa('" + t.id + "','financeiro')", b: "Abrir financeiro" });
   });
   pendentes().forEach(function (s) {
     if (dDiff(String(s.data).substring(0, 10), today()) >= 3)
@@ -1658,62 +1667,29 @@ function alertas() {
 }
 function nomeEmpresa(tid) { var t = find(DB.tenants, tid); return t ? t.nome : "—"; }
 function pg_exec() {
-  var mes = mesRef(today()), r = receitaMes(mes), al = alertas();
-  var crit = al.filter(function (x) { return x.n === "critico"; });
-  var h = "";
-  if (!empresas().length) {
-    h += '<div class="box" style="margin-bottom:20px">' + vazio("Nenhuma empresa cadastrada",
-      "O console começa vazio. Cadastre a primeira empresa para acompanhar contrato, implantação, licença e faturamento.",
-      '<button class="btn btn-p btn-lg" onclick="modalEmpresa()">' + ICON.plus + "Cadastrar empresa</button>", "empresa") + "</div>";
-    return h;
-  }
-  if (crit.length) {
-    h += '<div class="note ng" style="margin-bottom:18px"><span>' + ICON.alert + "</span><div><b>" + crit.length +
-      " alerta(s) crítico(s).</b> " + esc(crit[0].t) + '. <a href="#" onclick="event.preventDefault();' + crit[0].a + '">' + esc(crit[0].b) + "</a></div></div>";
-  }
-  h += '<div class="grid c4" style="margin-bottom:18px">' +
-    metric("Receita recorrente", money(mrrTotal()), ativas().length + " empresa(s) ativa(s)", "pos", "ir('empresas')") +
-    metric("Recebido em " + mLbl(mes + "-01"), money(r.recebida), "de " + money(r.prevista) + " previstos", "pos") +
-    metric("Em atraso", money(r.atraso), r.atraso ? "cobrança da manutenção" : "nada vencido", r.atraso ? "neg" : "pos", "ir('empresas')") +
-    metric("Solicitações", n0(pendentes().length), pendentes().length ? "aguardando decisão" : "nada pendente", pendentes().length ? "wr" : "pos", "ir('solicitacoes')") +
-    "</div>";
-  h += '<div class="grid c4" style="margin-bottom:22px">' +
-    metric("Em implantação", n0(implantando().length), implantando().length ? "ambientes sendo entregues" : "nenhuma em andamento", "inf", "ir('implantacoes')") +
-    metric("Suspensas", n0(empresas().filter(function (t) { return t.situacao === "suspensa"; }).length), "acesso bloqueado", "wr", "ir('empresas')") +
-    metric("Uso médio", usoMedio() + "%", "atividade dos últimos 30 dias", usoMedio() >= 50 ? "pos" : "wr") +
-    metric("Em risco", n0(emRisco().length), emRisco().length ? "clientes que precisam de atenção" : "carteira saudável", emRisco().length ? "neg" : "pos") +
-    "</div>";
-
-  /* evolução da receita */
-  var meses = [], i;
-  for (i = 5; i >= 0; i--) meses.push(mesRef(addM(today(), -i)));
-  h += '<div class="grid c2" style="margin-bottom:20px">';
-  h += box("Receita da plataforma", '<div class="box-b">' + chartLinhas(
-    meses.map(function (m) { return mLbl(m + "-01"); }),
-    [{ nome: "Prevista", cor: "var(--brand-2)", vals: meses.map(function (m) { return receitaMes(m).prevista; }) },
-    { nome: "Recebida", cor: "var(--grow)", vals: meses.map(function (m) { return receitaMes(m).recebida; }) }],
-    { fmt: money }) + "</div>", "", "últimos 6 meses");
-  h += box("Manutenção por empresa", '<div class="box-b">' + barras(
-    srt(ativas().map(function (t) { return { n: t.nome, v: mrr(t) }; }), function (x) { return x.v; }, true), money) +
-    "</div>", "", "recorrência mensal");
-  h += "</div>";
-
-  /* carteira */
-  h += '<div class="grid c2" style="margin-bottom:20px">';
-  var top = srt(empresas(), function (t) { return receitaGerada(t.id); }, true).slice(0, 5);
-  h += box("Clientes que mais geraram receita", '<div class="box-b" style="padding-top:6px">' + top.map(function (t) {
-    return '<div style="display:flex;gap:12px;align-items:center;padding:11px 0;border-top:1px solid var(--line-2);cursor:pointer" onclick="verEmpresa(\'' + t.id + '\')">' +
-      '<span class="av">' + ini2(t.nome) + '</span><div style="flex:1"><b style="font-size:13.5px">' + esc(t.nome) + "</b>" +
-      '<div class="sm mut">' + esc(resumoLicenca(t)) + " · " + sitNome(t.situacao) + "</div></div>" +
-      "<b>" + money(receitaGerada(t.id)) + "</b></div>";
-  }).join("") + "</div>");
-  h += box("Precisam de atenção", '<div class="box-b" style="padding-top:6px">' + (al.length ? al.slice(0, 6).map(function (x) {
-    return '<div style="display:flex;gap:12px;align-items:center;padding:11px 0;border-top:1px solid var(--line-2)">' +
-      '<span style="width:8px;height:8px;border-radius:50%;flex:none;background:' + (x.n === "critico" ? "var(--danger)" : "var(--alert)") + '"></span>' +
-      '<div style="flex:1;font-size:13px">' + esc(x.t) + "</div>" +
-      '<button class="btn btn-s" onclick="' + x.a + '">' + esc(x.b) + "</button></div>";
-  }).join("") : '<div class="sm mut" style="padding:14px 0">Nenhum alerta no momento. Carteira em dia.</div>') + "</div>");
-  h += "</div>";
+  var al = alertas(), crit = al.filter(function(x){return x.n === "critico";});
+  var at = ativas(), impl = implantando(), susp = empresas().filter(function(t){return t.situacao === "suspensa";});
+  var semAcesso = at.filter(function(t){return diasSemAcesso(t.id) >= 21;});
+  var semAmbiente = empresas().filter(function(t){return !t.provisionado;});
+  if (!empresas().length) return '<div class="box">' + vazio("Nenhuma empresa cadastrada","Cadastre a primeira empresa para acompanhar contratos, implantações, acessos e alertas.",'<button class="btn btn-p btn-lg" onclick="modalEmpresa()">'+ICON.plus+"Cadastrar empresa</button>","empresa") + '</div>';
+  var h='<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px"><div><div class="lg-eyebrow">CONTROLE DA OPERAÇÃO</div><div style="font-size:22px;font-weight:700;letter-spacing:-.6px">O que precisa da sua atenção agora</div></div><button class="btn" onclick="ir(\'empresas\')">Ver carteira completa</button></div>';
+  if(crit.length) h+='<div class="note ng" style="margin-bottom:18px"><span>'+ICON.alert+'</span><div><b>'+crit.length+' alerta(s) crítico(s).</b> '+esc(crit[0].t)+' <a href="#" onclick="event.preventDefault();'+crit[0].a+'">'+esc(crit[0].b)+'</a></div></div>';
+  h+='<div class="grid c4" style="margin-bottom:20px">'+
+    metric("Empresas ativas",n0(at.length),"clientes com acesso","pos","ir('empresas')")+
+    metric("Em implantação",n0(impl.length),impl.length?"entregas em andamento":"nenhuma pendente",impl.length?"inf":"pos","ir('implantacoes')")+
+    metric("Solicitações",n0(pendentes().length),pendentes().length?"precisam de decisão":"fila limpa",pendentes().length?"wr":"pos","ir('solicitacoes')")+
+    metric("Alertas",n0(al.length),al.length?"itens para agir":"operação estável",al.length?"wr":"pos","ir('notificacoes')")+'</div>';
+  h+='<div class="grid c2" style="margin-bottom:20px">';
+  h+=box("Fila operacional",'<div class="box-b">'+
+    (impl.length?'<div class="ln"><span class="k">Implantações em andamento</span><b>'+n0(impl.length)+'</b></div>':'')+
+    (semAmbiente.length?'<div class="ln"><span class="k">Empresas sem ambiente liberado</span><b>'+n0(semAmbiente.length)+'</b></div>':'')+
+    (semAcesso.length?'<div class="ln"><span class="k">Sem acesso há 21+ dias</span><b>'+n0(semAcesso.length)+'</b></div>':'')+
+    (susp.length?'<div class="ln"><span class="k">Acessos suspensos</span><b>'+n0(susp.length)+'</b></div>':'')+
+    (!impl.length&&!semAmbiente.length&&!semAcesso.length&&!susp.length?'<div class="sm mut">Nenhum gargalo operacional identificado.</div>':'')+'</div>','<button class="btn btn-s" onclick="ir(\'implantacoes\')">Abrir implantações</button>');
+  h+=box("Alertas e pendências",'<div class="box-b" style="padding-top:4px">'+(al.length?al.slice(0,7).map(function(x){return '<div style="display:flex;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line-2)"><span style="width:8px;height:8px;border-radius:50%;flex:none;background:'+(x.n==="critico"?"var(--danger)":"var(--alert)")+'"></span><div style="flex:1;font-size:13px">'+esc(x.t)+'</div><button class="btn btn-s" onclick="'+x.a+'">'+esc(x.b)+'</button></div>';}).join(''):'<div class="sm mut" style="padding:14px 0">Nenhum alerta no momento. Carteira sob controle.</div>')+'</div>','<button class="btn btn-s" onclick="ir(\'notificacoes\')">Central de alertas</button>');
+  h+='</div>';
+  var recent=srt(DB.logs||[],function(x){return x.data||x.criada||x.d;},true).slice(0,8);
+  h+=box("Atividade recente",'<div class="box-b" style="padding-top:4px">'+(recent.length?recent.map(function(x){return '<div class="ln"><span class="k">'+esc(x.acao||x.operacao||x.t||"Ação")+'<div class="sm mut">'+esc(x.detalhe||x.resumo||x.entidade||"")+'</div></span><span class="v sm mut">'+fdate(x.data||x.criada||x.d)+'</span></div>';}).join(''):'<div class="sm mut">Nenhuma atividade registrada ainda.</div>')+'</div>','<button class="btn btn-s" onclick="ir(\'auditoria\')">Ver auditoria</button>');
   return h;
 }
 /* =======================================================================
@@ -1767,7 +1743,7 @@ function pg_empresas(p) {
       ICON.plus + "Empresa nesta rede</button></div>" +
       '<div class="box-b"><div class="grid c2">' + cardEmpresa(hd) +
       filhas.map(cardEmpresa).join("") + "</div>" +
-      (vg.cheia ? '<div class="sm" style="margin-top:12px;color:var(--warn)">Rede no limite contratado. Amplie o limite na licença da holding para cadastrar outra empresa.</div>' : "") +
+      (vg.cheia ? '<div class="sm" style="margin-top:12px;color:var(--warn)">Rede no limite contratado. Amplie o limite na implantação da holding para cadastrar outra empresa.</div>' : "") +
       "</div></div>";
   });
   var soltas = l.filter(function (t) { return !dentro[t.id]; });
@@ -1854,7 +1830,7 @@ function emp_empresa(t) {
     ln("Telefone", t.tel ? ftel(t.tel) : "") + ln("WhatsApp", t.whats ? ftel(t.whats) : "") + ln("E-mail", t.email) +
     ln("Representante", t.representante) + ln("Funcionários", t.funcionarios ? String(t.funcionarios) : "") + "</div>");
   h += box("Plataforma", '<div class="box-b">' +
-    ln("Situação", sitNome(t.situacao)) + ln("Licença", resumoLicenca(t)) +
+    ln("Situação", sitNome(t.situacao)) + ln("Implantação", resumoLicenca(t)) +
     ln("Subdomínio", t.slug + ".vyoha.com.br") +
     '<div class="ln"><span class="k">Token de acesso</span><span class="v mono">' + esc(t.token || "—") + "</span></div>" +
     ln("Token válido até", t.token_validade ? fdate(t.token_validade) + " · " + diasParaTrocaToken(t) + " dias" : "sem validade") +
@@ -1892,11 +1868,14 @@ function emp_contrato(t) {
   var h = box("Contrato vigente", '<div class="box-b">' + (c ?
     ln("Versão", "v" + c.versao) + ln("Situação", c.status === "assinado" ? "Assinado" : "Aguardando assinatura") +
     ln("Enviado em", fdate(c.enviado)) + ln("Assinado em", c.assinado ? fdate(c.assinado) : "—") +
-    ln("Arquivo", c.arquivo) + ln("Aditivos", String((c.aditivos || []).length)) +
+    ln("Arquivo", c.arquivo || "Nenhum arquivo anexado") + ln("Aditivos", String((c.aditivos || []).length)) +
     '<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:14px">' +
     (c.status !== "assinado" ? '<button class="btn btn-p" onclick="assinarContrato(\'' + t.id + '\')">Registrar assinatura</button>' : "") +
+    '<label class="btn" style="cursor:pointer">' + ICON.file + "Selecionar contrato assinado<input type=\"file\" accept=\"application/pdf,.pdf\" class=\"hidden\" onchange=\"uploadContratoAssinado('" + t.id + "',this)\"></label>" +
+    (c.storage_path ? '<button class="btn" onclick="abrirContratoArquivo(\'' + t.id + '\')">Abrir arquivo</button>' : "") +
+    '<button class="btn" onclick="imprimirContratoEmpresa(\'' + t.id + '\')">Imprimir contrato</button>' +
     '<button class="btn" onclick="modalAditivo(\'' + t.id + '\')">Registrar aditivo</button></div>'
-    : vazio("Sem contrato registrado", "Registre o contrato assinado para liberar a implantação.", "", "file")) + "</div>");
+    : vazio("Sem contrato registrado", "Registre o contrato para liberar a implantação.", "", "file")) + "</div>");
   if (c && (c.aditivos || []).length) {
     h += '<div style="height:18px"></div>';
     h += box("Aditivos e renovações", tabela([
@@ -1955,10 +1934,10 @@ function emp_licenca(t) {
       '<div class="sm mut">' + (cheio ? "limite atingido — só amplia com solicitação aprovada" : Math.max(0, o.lim - o.uso) + " disponível") + "</div></div>";
   }
   var h = '<div class="grid c2">';
-  h += box("Licença contratada", '<div class="box-b">' +
-    ln("Tipo", "Licença vitalícia (pagamento único)") +
-    ln("Valor da licença", money(t.licenca ? t.licenca.valor_licenca : 0)) +
-    ln("Taxa de manutenção", money(mrr(t)) + " por mês") +
+  h += box("Implantação contratada", '<div class="box-b">' +
+    ln("Tipo", "Implantação (pagamento único)") +
+    ln("Valor da implantação", money(t.licenca ? t.licenca.valor_licenca : 0)) +
+    ln("Mensalidade", money(mrr(t)) + " por mês") +
     ln("Vencimento", "dia " + ((t.licenca && t.licenca.dia_venc) || 10)) +
     ln("Início", t.licenca ? fdate(t.licenca.inicio) : "—") +
     ln("Situação", t.licenca ? (t.licenca.status === "ativa" ? "Ativa" : t.licenca.status) : "—") +
@@ -2059,8 +2038,8 @@ function emp_financeiro(t) {
       "Os dados do cliente permanecem intactos — a suspensão apenas bloqueia o login.", "ng");
   }
   h += box("Títulos da empresa", tabela([
-    { h: "Competência", r: function (f) { return "<b>" + mLbl(f.competencia + "-01") + "</b><div class='sm mut'>" + esc(f.descricao) + "</div>"; } },
-    { h: "Tipo", r: function (f) { return f.tipo === "licenca" ? '<span class="tag t-inf">Licença</span>' : '<span class="tag t-mut">Manutenção</span>'; } },
+    { h: "Competência", r: function (f) { return "<b>" + mLbl(f.competencia + "-01") + "</b><div class='sm mut'>" + esc(rotuloFinanceiro(f.descricao)) + "</div>"; } },
+    { h: "Tipo", r: function (f) { return f.tipo === "licenca" ? '<span class="tag t-inf">Implantação</span>' : '<span class="tag t-mut">Mensalidade</span>'; } },
     { h: "Vencimento", r: function (f) { return fdate(f.venc); } },
     { h: "Valor", cls: "r", r: function (f) { return money(f.valor); } },
     { h: "Situação", r: function (f) { return tag(f.status); } },
@@ -2085,7 +2064,7 @@ function baixarFatura(id) {
       f.status = dados.status; f.pago_em = dados.pago_em;
       var t = find(DB.tenants, f.tenant_id);
       if (t && t.situacao === "inadimplente" && !diasAtraso(t.id)) t.situacao = "ativa";
-      auditar("Pagamento confirmado", nomeEmpresa(f.tenant_id), f.descricao + " · " + money(f.valor), f.tenant_id, "aberta", "paga");
+      auditar("Pagamento confirmado", nomeEmpresa(f.tenant_id), rotuloFinanceiro(f.descricao) + " · " + money(f.valor), f.tenant_id, "aberta", "paga");
       save(); toast("Pagamento confirmado no servidor.", "ok"); ir(View.pg, View.p);
     }).catch(function () { toast("Sem resposta do servidor. O pagamento não foi alterado.", "err"); });
   }, "Confirmar");
@@ -2141,7 +2120,7 @@ function emp_auditoria(t) {
 function modalEmpresa(id, rede) {
   var t = id ? find(DB.tenants, id) : null;
   var hd = rede ? find(DB.tenants, rede) : null;
-  if (!id && hd && vagasRede(hd).cheia) return toast("A rede " + hd.nome + " está no limite contratado. Amplie o limite na licença da holding.", "err");
+  if (!id && hd && vagasRede(hd).cheia) return toast("A rede " + hd.nome + " está no limite contratado. Amplie o limite na implantação da holding.", "err");
   modal(t ? (ehHolding(t) ? "Editar rede" : "Editar empresa") : hd ? "Nova empresa · rede " + hd.nome : "Nova empresa",
     '<div class="rw rw2"><div class="fld"><label>Nome fantasia <span class="rq">*</span></label><input id="em-nome" value="' + esc(t ? t.nome : "") + '"></div>' +
     '<div class="fld"><label>Razão social</label><input id="em-razao" value="' + esc(t ? t.razao || "" : "") + '"></div></div>' +
@@ -2160,8 +2139,8 @@ function modalEmpresa(id, rede) {
     '<div class="fld"><label>Subdomínio</label><input id="em-slug" value="' + esc(t ? t.slug : "") + '" placeholder="empresa"></div></div>' +
     seletorMatriz(t, rede) +
     (t ? "" : '<div class="sm mut" style="margin:16px 0 8px">Valores desta empresa — você define caso a caso</div>' +
-      '<div class="rw rw3"><div class="fld"><label>Licença (pagamento único)</label><input id="em-lic" value="0" placeholder="0,00"></div>' +
-      '<div class="fld"><label>Manutenção mensal</label><input id="em-man" value="0" placeholder="0,00"></div>' +
+      '<div class="rw rw3"><div class="fld"><label>Implantação (pagamento único)</label><input id="em-lic" value="0" placeholder="0,00"></div>' +
+      '<div class="fld"><label>Mensalidade</label><input id="em-man" value="0" placeholder="0,00"></div>' +
       '<div class="fld"><label>Dia de vencimento</label><input id="em-dia" value="10"></div></div>' +
       '<div class="sm mut" style="margin:14px 0 8px">Quantidade de acessos liberados</div>' +
       '<div class="rw rw3"><div class="fld"><label>Administradores</label><input id="em-adm" value="' + LIMITES_PADRAO.admins + '"></div>' +
@@ -2201,7 +2180,7 @@ function seletorMatriz(t, forcar) {
 }
 function modalRede() {
   modal("Nova rede",
-    nota("Uma rede é um grupo empresarial. Você cadastra a <b>holding</b> aqui; as empresas do grupo entram depois, cada uma com licença e manutenção próprias.", "inf") +
+    nota("Uma rede é um grupo empresarial. Você cadastra a <b>holding</b> aqui; as empresas do grupo entram depois, cada uma com implantação e mensalidade próprias.", "inf") +
     '<div class="rw rw2"><div class="fld"><label>Nome da rede / holding <span class="rq">*</span></label><input id="rd-nome" placeholder="ex.: nome do grupo"></div>' +
     '<div class="fld"><label>Razão social</label><input id="rd-razao"></div></div>' +
     '<div class="rw rw3"><div class="fld"><label>CNPJ</label><input id="rd-cnpj"></div>' +
@@ -2209,13 +2188,13 @@ function modalRede() {
     '<div class="fld"><label>UF</label><input id="rd-uf" maxlength="2"></div></div>' +
     '<div class="rw rw2"><div class="fld"><label>E-mail do gestor da rede <span class="rq">*</span></label><input id="rd-mail" placeholder="gestor@grupo.com"></div>' +
     '<div class="fld"><label>WhatsApp</label><input id="rd-whats"></div></div>' +
-    '<div class="sm mut" style="margin:16px 0 8px">Licença da holding — o ambiente de gestão também é cobrado</div>' +
-    '<div class="rw rw3"><div class="fld"><label>Licença (pagamento único)</label><input id="rd-lic" value="0"></div>' +
-    '<div class="fld"><label>Manutenção mensal</label><input id="rd-man" value="0"></div>' +
+    '<div class="sm mut" style="margin:16px 0 8px">Implantação da holding — o ambiente de gestão também é cobrado</div>' +
+    '<div class="rw rw3"><div class="fld"><label>Implantação (pagamento único)</label><input id="rd-lic" value="0"></div>' +
+    '<div class="fld"><label>Mensalidade</label><input id="rd-man" value="0"></div>' +
     '<div class="fld"><label>Dia de vencimento</label><input id="rd-dia" value="10"></div></div>' +
     '<div class="rw rw2"><div class="fld"><label>Empresas permitidas na rede</label><input id="rd-emp" value="' + LIMITES_PADRAO.empresas + '"></div>' +
     '<div class="fld"><label>Gestores da holding</label><input id="rd-adm" value="' + LIMITES_PADRAO.admins + '"></div></div>' +
-    nota("Cada empresa da rede paga a <b>própria licença</b> e a própria manutenção, definidas por você caso a caso.", "ok"),
+    nota("Cada empresa da rede paga a <b>própria implantação</b> e a própria mensalidade, definidas por você caso a caso.", "ok"),
     '<button class="btn" onclick="fecharModal()">Cancelar</button>' +
     '<button class="btn btn-p" onclick="salvarRede()">Cadastrar rede</button>', true);
 }
@@ -2264,8 +2243,8 @@ function confirmarPagamentoInicial(id) {
   modal("Confirmar pagamento e criar ambiente de " + esc(t.nome),
     nota("Ao confirmar, o ambiente é criado: token de acesso, configuração inicial, administrador e liberação do login. " +
       "<b>Sem esta confirmação o ambiente não existe.</b>", "wr") +
-    ln("Licença vitalícia", money(t.licenca ? t.licenca.valor_licenca : 0)) +
-    ln("Manutenção mensal", money(t.licenca ? t.licenca.valor : 0)) +
+    ln("Implantação", money(t.licenca ? t.licenca.valor_licenca : 0)) +
+    ln("Mensalidade", money(t.licenca ? t.licenca.valor : 0)) +
     ln("E-mail do administrador", t.email) +
     '<div class="fld" style="margin-top:14px"><label>Senha temporária do administrador</label>' +
     '<input id="pv-senha" value="' + esc(sugerida) + '">' +
@@ -2308,6 +2287,7 @@ function provisionar(t, senhaEscolhida) {
   /* e o servidor passa a saber quem é esta empresa e de qual rede */
   registrarEmpresaNuvem(t);
   /* o ambiente vai junto: o cliente entra do computador dele no mesmo dia */
+  publicarAmbienteConsole(t);
   gerarFaturas(t);
   var im = implantacaoDe(t.id) || (DB.implantacoes.push(novaImplantacao(t, false)), implantacaoDe(t.id));
   im.etapa = "implantacao";
@@ -2447,11 +2427,11 @@ function reativarEmpresa(id) {
 function modalPlanoEmpresa(id) {
   var t = find(DB.tenants, id), lim = limites(t);
   modal("Valores e limites de " + esc(t.nome),
-    nota("Cada empresa tem os <b>seus</b> valores. A licença é paga uma vez; a manutenção é mensal. " +
+    nota("Cada empresa tem os <b>seus</b> valores. A implantação é paga uma vez; a mensalidade é recorrente. " +
       "Os acessos abaixo são o teto que o cliente pode criar sozinho.", "inf") +
-    '<div class="rw rw3"><div class="fld"><label>Licença (pagamento único)</label><input id="pl-lic" value="' +
+    '<div class="rw rw3"><div class="fld"><label>Implantação (pagamento único)</label><input id="pl-lic" value="' +
     (t.licenca ? t.licenca.valor_licenca : 0) + '"></div>' +
-    '<div class="fld"><label>Manutenção mensal</label><input id="pl-valor" value="' + (t.licenca ? t.licenca.valor : 0) + '"></div>' +
+    '<div class="fld"><label>Mensalidade</label><input id="pl-valor" value="' + (t.licenca ? t.licenca.valor : 0) + '"></div>' +
     '<div class="fld"><label>Dia de vencimento</label><input id="pl-dia" value="' + ((t.licenca && t.licenca.dia_venc) || 10) + '"></div></div>' +
     '<div class="sm mut" style="margin:14px 0 8px">Quantidade de acessos liberados</div>' +
     '<div class="rw rw3"><div class="fld"><label>Administradores</label><input id="pl-adm" value="' + lim.admins + '"></div>' +
@@ -2466,7 +2446,7 @@ function modalPlanoEmpresa(id) {
 }
 function salvarPlanoEmpresa(id) {
   var t = find(DB.tenants, id), u = usoLicenca(t);
-  if (!t || !t.licenca) return toast("Licença da empresa não encontrada.", "err");
+  if (!t || !t.licenca) return toast("Implantação da empresa não encontrada.", "err");
   var novoAdm = Math.max(1, nv("pl-adm")), novoPdv = Math.max(0, nv("pl-pdv")), novoOp = Math.max(0, nv("pl-op"));
   if (novoAdm < u.admins.uso) return toast("A empresa já usa " + u.admins.uso + " administradores. Desative um antes de reduzir.", "err");
   if (novoPdv < u.pdvs.uso) return toast("A empresa já usa " + u.pdvs.uso + " PDVs. Desative um antes de reduzir.", "err");
@@ -2632,7 +2612,7 @@ function analisar(id) {
       ln("Rede hoje", vg.uso + " de " + vg.limite + " empresas");
     corpo += nota(vg.cheia
       ? "A rede está <b>no limite</b>. Aprovar amplia o limite para <b>" + (vg.limite + 1) + "</b> empresas. " +
-        "A empresa em si continua sendo cadastrada por você, com licença e manutenção próprias."
+        "A empresa em si continua sendo cadastrada por você, com implantação e mensalidade próprias."
       : "A rede ainda tem <b>" + vg.livres + " vaga(s)</b>. Aprovar libera o cadastro; você define a licença e a manutenção da nova empresa.",
       vg.cheia ? "wr" : "inf");
   }
@@ -3031,7 +3011,7 @@ function pg_globais() {
     '<label style="display:flex;gap:9px;align-items:flex-start;padding:9px 0"><input type="checkbox" id="z-op" checked>' +
     '<span><b style="font-size:13px;display:block">Operação das empresas</b><span class="sm mut">clientes, produtos, estoque, vendas, parcelas, caixa, cobranças, acordos, metas e leads</span></span></label>' +
     '<label style="display:flex;gap:9px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line-2)"><input type="checkbox" id="z-fin">' +
-    '<span><b style="font-size:13px;display:block">Financeiro da Vyoha</b><span class="sm mut">títulos de licença e manutenção e despesas lançadas</span></span></label>' +
+    '<span><b style="font-size:13px;display:block">Financeiro da Vyoha</b><span class="sm mut">títulos de implantação e mensalidade e despesas lançadas</span></span></label>' +
     '<label style="display:flex;gap:9px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line-2)"><input type="checkbox" id="z-atend">' +
     '<span><b style="font-size:13px;display:block">Atendimento</b><span class="sm mut">chamados de suporte, solicitações das empresas e pedidos da Rede Vyoha</span></span></label>' +
     '<label style="display:flex;gap:9px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line-2)"><input type="checkbox" id="z-log">' +
@@ -3145,7 +3125,7 @@ function zerarDados() {
    FINANCEIRO DA VYOHA — receita, custo e indicadores do próprio negócio
    ======================================================================= */
 var CAT_DESPESA = ["Infraestrutura e nuvem", "Ferramentas e licenças", "Equipe", "Marketing", "Impostos", "Contabilidade", "Terceiros", "Outros"];
-var ORIGEM_RECEITA = { licenca: "Licenças", manutencao: "Manutenção", servico: "Serviços e ampliações", consultoria: "Consultoria", growth: "Growth" };
+var ORIGEM_RECEITA = { licenca: "Implantações", manutencao: "Mensalidade", servico: "Serviços e ampliações", consultoria: "Consultoria", growth: "Growth" };
 
 function receitasPeriodo(ini, fim) {
   return DB.faturas.filter(function (f) {
@@ -3203,7 +3183,7 @@ function pg_financeiro(p) {
     h += "</div>";
     h += box("Contas a receber", tabela([
       { h: "Empresa", r: function (f) { return "<b>" + esc(nomeEmpresa(f.tenant_id)) + "</b>"; } },
-      { h: "Título", r: function (f) { return esc(f.descricao); } },
+      { h: "Título", r: function (f) { return esc(rotuloFinanceiro(f.descricao)); } },
       { h: "Vencimento", r: function (f) { return fdate(f.venc) + (dt(f.venc) < dt(today()) ? '<div class="sm" style="color:var(--danger)">' + dDiff(f.venc, today()) + " dias de atraso</div>" : ""); } },
       { h: "Valor", cls: "r", r: function (f) { return money(f.valor); } },
       { h: "Situação", r: function (f) { return tag(f.status); } },
@@ -3217,7 +3197,7 @@ function pg_financeiro(p) {
       { h: "Quando", r: function (f) { return fdate(f.pago_em); } },
       { h: "Empresa", r: function (f) { return "<b>" + esc(nomeEmpresa(f.tenant_id)) + "</b>"; } },
       { h: "Origem", r: function (f) { return '<span class="chip">' + esc(ORIGEM_RECEITA[f.tipo] || f.tipo) + "</span>"; } },
-      { h: "Descrição", r: function (f) { return esc(f.descricao); } },
+      { h: "Descrição", r: function (f) { return esc(rotuloFinanceiro(f.descricao)); } },
       { h: "Valor", cls: "r", r: function (f) { return '<b style="color:var(--grow-deep)">+ ' + money(f.valor) + "</b>"; } }
     ], srt(rec, function (f) { return f.pago_em; }, true),
       vazio("Nenhum recebimento no mês", "Os pagamentos confirmados aparecem aqui.", "", "money")),
@@ -3246,7 +3226,7 @@ function pg_financeiro(p) {
     "</div>";
   h += box("Receita por empresa", tabela([
     { h: "Empresa", r: function (t) { return "<b>" + esc(t.nome) + "</b><div class='sm mut'>cliente desde " + fdate(t.criada) + "</div>"; } },
-    { h: "Manutenção", cls: "r", r: function (t) { return money(mrr(t)); } },
+    { h: "Mensalidade", cls: "r", r: function (t) { return money(mrr(t)); } },
     { h: "Já pagou", cls: "r", r: function (t) { return money(receitaGerada(t.id)); } },
     { h: "Em aberto", cls: "r", r: function (t) { return money(sum(emAberto(t.id), function (f) { return f.valor; })); } },
     { h: "Meses de casa", cls: "r", r: function (t) { return String(Math.max(1, Math.round(Math.abs(dDiff(t.criada, today())) / 30))); } },
@@ -3335,7 +3315,7 @@ function pg_cobranca() {
       }).join("") + "</div>") + '<div style="height:18px"></div>';
   }
   h += box("Títulos em aberto", tabela([
-    { h: "Empresa", r: function (f) { return "<b>" + esc(nomeEmpresa(f.tenant_id)) + "</b><div class='sm mut'>" + esc(f.descricao) + "</div>"; } },
+    { h: "Empresa", r: function (f) { return "<b>" + esc(nomeEmpresa(f.tenant_id)) + "</b><div class='sm mut'>" + esc(rotuloFinanceiro(f.descricao)) + "</div>"; } },
     { h: "Competência", r: function (f) { return mLbl(f.competencia + "-01"); } },
     { h: "Vencimento", r: function (f) { return fdate(f.venc); } },
     { h: "Atraso", r: function (f) { var d = dt(f.venc) < dt(today()) ? dDiff(f.venc, today()) : 0; return d ? '<span style="color:var(--danger)">' + d + " dias</span>" : '<span class="mut">em dia</span>'; } },
@@ -3377,7 +3357,7 @@ function pg_contratos() {
     metric("Assinados", n0(assinados.length), "empresas com contrato válido", "pos") +
     metric("Pendentes", n0(pendentes2.length), pendentes2.length ? "aguardando assinatura" : "nada pendente", pendentes2.length ? "wr" : "pos") +
     metric("Aditivos", n0(sum(l, function (c) { return (c.aditivos || []).length; })), "ampliações registradas") +
-    metric("Licenças vendidas", money(sum(empresas(), function (t) { return t.licenca ? t.licenca.valor_licenca : 0; })), "somando todas as empresas") +
+    metric("Implantações vendidas", money(sum(empresas(), function (t) { return t.licenca ? t.licenca.valor_licenca : 0; })), "somando todas as empresas") +
     "</div>";
   h += box("Documentos", tabela([
     { h: "Empresa", r: function (c) { return "<b>" + esc(nomeEmpresa(c.tenant_id)) + "</b>"; } },
@@ -3547,7 +3527,7 @@ function integridade() {
     { t: "Ambientes provisionados com token", ok: !semToken, n: semToken },
     { t: cfgToken().meses ? "Tokens com validade definida" : "Renovação de token desligada nas configurações", ok: !semValidade, n: semValidade },
     { t: "Parcelas ligadas a uma venda", ok: !orfas, n: orfas },
-    { t: "Empresas com licença registrada", ok: !semPlano, n: semPlano },
+    { t: "Empresas com implantação registrada", ok: !semPlano, n: semPlano },
     { t: "Tokens únicos entre as empresas", ok: !repetidos, n: repetidos }
   ];
 }
@@ -3562,7 +3542,7 @@ function notificacoes() {
     n.push({ nivel: "critico", txt: "Chamado de " + nomeEmpresa(t.tenant_id) + " fora do SLA: " + t.assunto, acao: "abrirChamado('" + t.id + "')", btn: "Responder", area: "Suporte" });
   });
   aReceber().filter(function (f) { return dt(f.venc) < dt(today()); }).slice(0, 10).forEach(function (f) {
-    n.push({ nivel: "aviso", txt: nomeEmpresa(f.tenant_id) + " · " + f.descricao + " vencido em " + fdate(f.venc), acao: "ir('cobranca')", btn: "Cobrança", area: "Financeiro" });
+    n.push({ nivel: "aviso", txt: nomeEmpresa(f.tenant_id) + " · " + rotuloFinanceiro(f.descricao) + " vencido em " + fdate(f.venc), acao: "ir('cobranca')", btn: "Cobrança", area: "Financeiro" });
   });
   empresas().forEach(function (t) {
     var d = diasParaTrocaToken(t);
@@ -3649,6 +3629,7 @@ function supaAutenticado() { return !!SUPA_TOKEN && Date.now() < SUPA_EXP; }
 function supaSair() {
   SUPA_TOKEN = null; SUPA_EXP = 0; SUPA_USER = "";
   esquecerSessaoSupa();
+  try { Store.del(K_MAPA_ENVIADO); } catch (e) {}
   auditar("Console desconectado do servidor", "", "");
   ir("acessos");
 }
@@ -3680,7 +3661,7 @@ function supaEntrar(volta) {
     .then(function (x) {
       if (!x.ok || !x.j.access_token) return bad(x.j.error_description || x.j.msg || "Não foi possível entrar. Confira o e-mail e a senha.");
       guardarSessaoSupa(x.j, mail);
-      f4_sincronizar();
+      publicarTudoSozinho();
       ir(volta || "leads");
     }).catch(function () { bad("Sem resposta do Supabase. Verifique a URL do projeto e a sua internet."); });
 }
@@ -4137,9 +4118,137 @@ function pintarCopias() {
   }).join("");
 }
 
-/* ---------------- ambiente e rede: servidor ----------------
-   Ambiente, rede e demais dados são lidos/escritos no Supabase.
-   Não existe publicação do estado local. */
+/* ---------------- o ambiente publicado na liberação ----------------
+   O cliente precisa conseguir entrar do computador dele, que nunca
+   viu este sistema. Para isso o ambiente tem que existir no servidor
+   ANTES do primeiro acesso — e quem tem esses dados na mão, na hora
+   de liberar a empresa, é o console. Senha nenhuma vai no pacote. */
+var SEGREDOS_AMB = ["senha", "senha_hash", "salt", "senha_em", "provisoria", "tentativas", "bloqueio_ate", "bloqueado_ate", "acesso"];
+function semSegredosConsole(u) {
+  var c = {};
+  for (var k in u) if (u.hasOwnProperty(k) && SEGREDOS_AMB.indexOf(k) < 0) c[k] = u[k];
+  return c;
+}
+function pacoteAmbienteConsole(t) {
+  if (!t) return null;
+  return {
+    tenant: t,
+    config: DB.config.filter(function (x) { return x.tenant_id === t.id; })[0] || null,
+    users: DB.users.filter(function (u) { return u.tenant_id === t.id; }).map(semSegredosConsole)
+  };
+}
+function publicarAmbienteConsole(t, depois) {
+  if (!supaConfigurado() || !supaAutenticado() || !t) return depois && depois(false);
+  var p = pacoteAmbienteConsole(t);
+  if (!p) return depois && depois(false);
+  supaPedido("/rest/v1/ambientes", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({ tenant_id: t.id, dados: p })
+  }).then(function (r) { if (depois) depois(r.ok); })
+    .catch(function () { if (depois) depois(false); });
+}
+function publicarAmbientesTodos() {
+  if (!supaConfigurado() || !supaAutenticado()) return toast("Conecte a sua conta do Supabase nesta tela primeiro.", "err");
+  var lista = DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; });
+  if (!lista.length) return toast("Nenhuma empresa liberada ainda.", "err");
+  var corpo = lista.map(function (t) { return { tenant_id: t.id, dados: pacoteAmbienteConsole(t) }; });
+  supaPedido("/rest/v1/ambientes", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(corpo)
+  }).then(function (r) {
+    if (!r.ok) return toast("O Supabase recusou o envio (" + r.status + ").", "err");
+    auditar("Ambientes publicados", lista.length + " empresa(s)", "");
+    save(); toast(lista.length + " ambiente(s) prontos para o primeiro acesso.", "ok");
+  }).catch(function () { toast("Sem resposta do Supabase.", "err"); });
+}
+
+/* ---------------- o mapa da rede no servidor ----------------
+   Quem é matriz de quem não pode ser decidido pelo navegador do
+   cliente. O console publica esse mapa; é ele que o servidor usa
+   para somar os números que o gestor da rede recebe. */
+/* o administrador da empresa: é o único e-mail que consegue refazer
+   o próprio vínculo pelo token quando não há ambiente publicado */
+function adminDaEmpresa(t) {
+  var l = DB.users.filter(function (u) {
+    return u.tenant_id === t.id && u.status !== "inativo" &&
+      (u.perfil === "admin" || u.perfil === "holding");
+  });
+  return l[0] ? String(l[0].email || "").toLowerCase() : null;
+}
+function linhaEmpresaNuvem(t) {
+  return {
+    tenant_id: t.id, nome: t.nome, matriz_id: t.matriz_id || null,
+    ativo: t.status === "ativo",
+    token: t.token || null, email_admin: adminDaEmpresa(t)
+  };
+}
+function registrarEmpresaNuvem(t, depois) {
+  if (!supaConfigurado() || !supaAutenticado() || !t) return depois && depois(false);
+  supaPedido("/rest/v1/empresas", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(linhaEmpresaNuvem(t))
+  }).then(function (r) { if (depois) depois(r.ok); })
+    .catch(function () { if (depois) depois(false); });
+}
+function publicarMapaDaRede() {
+  if (!supaConfigurado() || !supaAutenticado()) return toast("Conecte a sua conta do Supabase nesta tela primeiro.", "err");
+  var lista = DB.tenants.filter(function (t) { return t.id !== "vyoha"; }).map(linhaEmpresaNuvem);
+  if (!lista.length) return toast("Nenhuma empresa cadastrada ainda.", "err");
+  supaPedido("/rest/v1/empresas", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(lista)
+  }).then(function (r) {
+    if (!r.ok) return toast("O Supabase recusou o envio (" + r.status + ").", "err");
+    auditar("Mapa da rede publicado", lista.length + " empresa(s)", "");
+    save(); toast(lista.length + " empresa(s) no mapa do servidor.", "ok");
+  }).catch(function () { toast("Sem resposta do Supabase.", "err"); });
+}
+
+/* ---------------- publicar deixou de ser tarefa de alguém ----------------
+   Publicar o mapa e os ambientes nunca foi uma decisão: é só o que
+   precisa estar lá para o cliente conseguir entrar. Então acontece
+   sozinho, sempre que o console está conectado e alguma coisa mudou.
+   Os botões continuam existindo para forçar na hora — mas ninguém
+   precisa lembrar deles. */
+var K_MAPA_ENVIADO = "vyoha_mapa_enviado";
+function retratoDaRede() {
+  return JSON.stringify(DB.tenants.filter(function (t) { return t.id !== "vyoha"; })
+    .map(function (t) {
+      var l = linhaEmpresaNuvem(t);
+      return [l.tenant_id, l.nome, l.matriz_id, l.ativo, l.token, l.email_admin,
+        DB.users.filter(function (u) { return u.tenant_id === t.id; })
+          .map(function (u) { return u.id + ":" + u.email + ":" + u.perfil + ":" + u.status; }).join(",")].join("|");
+    }).sort());
+}
+function publicarTudoSozinho() {
+  if (!supaConfigurado() || !supaAutenticado()) return;
+  var agora = retratoDaRede();
+  if (Store.get(K_MAPA_ENVIADO) === agora) return;
+  var empresasLinhas = DB.tenants.filter(function (t) { return t.id !== "vyoha"; }).map(linhaEmpresaNuvem);
+  if (!empresasLinhas.length) return;
+  supaPedido("/rest/v1/empresas", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(empresasLinhas)
+  }).then(function (r) {
+    if (!r.ok) return;
+    var amb = DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; })
+      .map(function (t) { return { tenant_id: t.id, dados: pacoteAmbienteConsole(t) }; });
+    if (!amb.length) { try { Store.set(K_MAPA_ENVIADO, agora); } catch (e) {} return; }
+    supaPedido("/rest/v1/ambientes", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(amb)
+    }).then(function (r2) {
+      if (r2.ok) { try { Store.set(K_MAPA_ENVIADO, agora); } catch (e) {} }
+    }).catch(function () {});
+  }).catch(function () {});
+}
+
 /* ---------------- acesso na nuvem criado sozinho ----------------
    Ao provisionar a empresa, a conta de acesso do administrador dela
    nasce no Supabase junto com o ambiente. Você não abre o painel. */
@@ -4310,18 +4419,21 @@ function pg_acessos() {
         "A conta já existia lá com outra senha, e o servidor recusou a troca. " +
         "Quase sempre é a função <b>redefinir-senha</b> desatualizada — republique em Edge Functions e tente de novo.", "wr");
   }
-  /* O servidor é a autoridade. Esta tela apenas consulta o estado atual. */
-  var emDia = CONSOLE_ESTADO.servidor === "ok" && !!CONSOLE_ESTADO.ultima_sincronizacao;
+  /* publicar deixou de ser tarefa de alguém: acontece ao abrir o console
+     e a cada minuto, quando alguma coisa muda. Os botões continuam para
+     forçar na hora — mas ninguém precisa lembrar deles. */
+  var emDia = Store.get(K_MAPA_ENVIADO) === retratoDaRede();
   h += '<div style="height:14px"></div>' +
     box("O que está no servidor", '<div class="box-b">' +
       nota(emDia
-        ? "<b>Servidor conectado.</b> Os dados exibidos foram consultados do Supabase."
-        : "<b>Servidor não confirmado.</b> O console tentará consultar novamente o Supabase automaticamente.", emDia ? "ok" : "wr") +
+        ? "<b>Tudo publicado.</b> O mapa das empresas e os ambientes no servidor estão iguais ao que existe aqui."
+        : "<b>Tem coisa para subir.</b> Vai sozinho em instantes — o console verifica ao abrir e a cada 30 segundos, " +
+          "sempre que alguma coisa muda. Se quiser não esperar, use o botão.", emDia ? "ok" : "wr") +
       '<div class="sm mut" style="margin:12px 0">O <b>mapa</b> diz ao servidor quais empresas somar para cada gestor de rede, ' +
       "e leva o token e o e-mail do dono — é isso que permite um acesso perdido se religar sozinho. " +
       "O <b>ambiente</b> é o que deixa o cliente entrar de um computador que nunca viu o sistema. " +
       "Senha nenhuma vai em nenhum dos dois.</div>" +
-      '<button class="btn" onclick="forcarSincronizacaoConsole()">Sincronizar agora</button>' +
+      '<button class="btn" onclick="publicarMapaDaRede();publicarAmbientesTodos()">Publicar agora</button>' +
       '<button class="btn" style="margin-left:8px" onclick="criarAcessosQueFaltam()">Criar os acessos que faltam</button>' +
       '<button class="btn btn-s" style="margin-left:8px" onclick="supaSair()">Desconectar do Supabase</button></div>');
   setTimeout(carregarCopiasVyoha, 0);
@@ -4355,6 +4467,14 @@ function consolePodeOperar(acao) {
 (function () {
   if (!load()) seedConsole();
   if (!Array.isArray(DB.removidos)) DB.removidos = [];
+  /* o console também divide o banco com as outras abas: sem escutar as
+     mudanças, a aba antiga apaga o que a nova cadastrou */
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("storage", function (e) {
+      if (!e || e.key !== KEY) return;
+      try { if (load() && Sess && View.pg) ir(View.pg, View.p); } catch (err) {}
+    });
+  }
   migrar();
   migrarSenhas();
   var trocados = renovarTokensVencidos();
@@ -4450,7 +4570,6 @@ function f4_entrar(mail, senha) {
 }
 
 function f4_esquecer_servidor() {
-  try { vyohaRtParar(); } catch (e) {}
   try { SUPA_TOKEN = null; SUPA_EXP = 0; SUPA_USER = ""; esquecerSessaoSupa(); } catch (e) {}
   F4_IDENT = null;
 }
@@ -4484,32 +4603,46 @@ function f4_espelhar(ident) {
 function f4_sincronizar(depois) {
   if (!SUPA_TOKEN) { if (depois) depois(false); return; }
   var colecoes = ["faturas", "contratos", "implantacoes", "planos", "solicitacoes", "tickets", "despesas"];
-  var pendentes = 2 + colecoes.length;
+  var pendentes = 3 + colecoes.length;
   function fim() { if (--pendentes <= 0) { save(); if (depois) depois(true); } }
 
-  f4_rpc("rede_empresas").then(function (r) {
+  f4_rpc("console_empresas").then(function (r) {
     if (Array.isArray(r.corpo)) {
-      /* O servidor é a autoridade: empresas que não existem mais na rede
-         não podem permanecer presas no cache local do Console. */
+      /* Fonte completa do prontuário. O cache nunca deve apagar dados
+         cadastrais, valores, token ou estado do ambiente. */
       var idsServidor = {};
       r.corpo.forEach(function (e) { idsServidor[e.tenant_id] = true; });
-      DB.tenants = (DB.tenants || []).filter(function (t) {
-        return t && (idsServidor[t.id] || t.id === "vyoha");
-      });
+      DB.tenants = (DB.tenants || []).filter(function (t) { return t && (idsServidor[t.id] || t.id === "vyoha"); });
       r.corpo.forEach(function (e) {
         var t = find(DB.tenants, e.tenant_id);
         if (!t) { t = { id: e.tenant_id, criada: today() }; DB.tenants.push(t); }
-        t.nome = e.nome;
+        var d = e.dados || {};
+        t.nome = e.nome || t.nome;
         t.status = e.ativo ? "ativo" : "inativo";
         t.matriz_id = e.matriz_id || null;
-        t.tipo = e.tipo || ((e.matriz_id == null && Number(e.acessos || 0) > 0 && /grupo|holding/i.test(String(e.nome || ""))) ? "holding" : (t.tipo || "empresa"));
+        t.tipo = d.tipo || e.tipo || t.tipo || "empresa";
         t.email = e.email_admin || t.email || "";
         t.email_admin = e.email_admin || t.email_admin || "";
+        t.token = e.token || t.token || null;
+        t.provisionado = !!t.token;
         t.ultimo_acesso = e.ultimo_acesso || null;
-        t.indicadores = { acessos: e.acessos, ativos: e.ativos, vendas: e.vendas,
-                          faturado: e.faturado, em_aberto: e.em_aberto };
+        ["razao","cnpj","ie","segmento","cidade","uf","funcionarios","endereco","tel","whats","representante","slug","obs","tags"].forEach(function (k) {
+          if (d[k] !== undefined) t[k] = d[k];
+        });
+        if (d.licenca) t.licenca = d.licenca;
+        if (d.situacao) t.situacao = d.situacao;
+        if (!t.situacao) t.situacao = t.provisionado ? "implantacao" : "contrato_assinado";
       });
     }
+    fim();
+  }).catch(fim);
+
+  f4_rpc("rede_empresas").then(function (r) {
+    if (Array.isArray(r.corpo)) r.corpo.forEach(function (e) {
+      var t = find(DB.tenants, e.tenant_id); if (!t) return;
+      t.indicadores = { acessos: e.acessos, ativos: e.ativos, vendas: e.vendas,
+                        faturado: e.faturado, em_aberto: e.em_aberto };
+    });
     fim();
   }).catch(fim);
 
@@ -4579,7 +4712,6 @@ function f4_abrir(ident) {
   var err = el("cs-err"); if (err) err.classList.add("hidden");
   iniciar();
   f4_marca("dentro");
-  vyohaRtIniciar();
   f4_sincronizar(function () { try { if (View.pg) ir(View.pg, View.p); } catch (e) {} });
   if (ident.trocar_senha) { try { trocaObrigatoria(); } catch (e) {} }
 }
@@ -4596,7 +4728,6 @@ function f4_doLogin() {
       return;
     }
     guardarSessaoSupa(x.j, mail);
-    vyohaRtIniciar();
     return f4_rpc("meu_acesso").then(function (r) {
       var ident = r.corpo || {};
       if (!ident.ok || ident.perfil !== "vyoha") {
@@ -4658,7 +4789,6 @@ function f4_salvarTroca() {
 }
 
 function f4_sair() {
-  try { vyohaRtParar(); } catch (e) {}
   try { if (Sess) { encerrarSessao(Sess.sess_id, "logout"); } } catch (e) {}
   Sess = null;
   try { Store.del(CKEY); } catch (e) {}
@@ -4710,31 +4840,6 @@ window.gerarAcessoEmergencia = gerarAcessoEmergencia;
 window.identidadeDoServidor = function () { return F4_IDENT; };
 window.rpcConsole = f4_rpc;
 window.sincronizarRede = f4_sincronizar;
-/* ===============================================================
-   VYOHA CONSOLE · REALTIME VERDADEIRO
-   O polling de 30s permanece como fallback. Apos autenticacao,
-   o navegador abre um canal Supabase Realtime para as tabelas
-   que alimentam o Console.
-   =============================================================== */
-var VYOHA_RT = { ws: null, timer: null, heartbeat: null, ref: 0, tentativas: 0, conectado: false };
-var VYOHA_RT_TABELAS = ["empresas","faturas","contratos","implantacoes","planos","solicitacoes","tickets","despesas","auditoria"];
-function vyohaRtUrl() { var c = supaCfg(); return c.url.replace(/^http/i, "ws") + "/realtime/v1/websocket?apikey=" + encodeURIComponent(c.key) + "&vsn=1.0.0"; }
-function vyohaRtEnviar(msg) { if (VYOHA_RT.ws && VYOHA_RT.ws.readyState === 1) { VYOHA_RT.ws.send(JSON.stringify(msg)); return true; } return false; }
-function vyohaRtFechar() { try { if (VYOHA_RT.heartbeat) clearInterval(VYOHA_RT.heartbeat); } catch (e) {} VYOHA_RT.heartbeat=null; try { if (VYOHA_RT.ws) VYOHA_RT.ws.close(); } catch (e) {} VYOHA_RT.ws=null; VYOHA_RT.conectado=false; }
-function vyohaRtAgendar() { try { if (VYOHA_RT.timer) clearTimeout(VYOHA_RT.timer); } catch (e) {} if (!supaAutenticado()) return; var atraso=Math.min(30000,Math.max(3000,2000*Math.pow(2,VYOHA_RT.tentativas||0))); VYOHA_RT.timer=setTimeout(vyohaRtConectar,atraso); }
-function vyohaRtSincronizar() { if (window.__VYOHA_RT_SYNCING) return; window.__VYOHA_RT_SYNCING=true; f4_sincronizar(function(){window.__VYOHA_RT_SYNCING=false;}); }
-function vyohaRtConectar() {
-  if (!supaConfigurado() || !supaAutenticado() || typeof WebSocket === "undefined") return;
-  vyohaRtFechar(); var ws; try { ws=new WebSocket(vyohaRtUrl()); } catch(e){ vyohaRtAgendar(); return; } VYOHA_RT.ws=ws;
-  ws.onopen=function(){ VYOHA_RT.tentativas=0; var changes=VYOHA_RT_TABELAS.map(function(t){return {event:"*",schema:"public",table:t};}); vyohaRtEnviar({topic:"realtime:console",event:"phx_join",payload:{config:{broadcast:{self:false},presence:{key:"console"},postgres_changes:changes,private:false},access_token:SUPA_TOKEN},ref:String(++VYOHA_RT.ref)}); VYOHA_RT.heartbeat=setInterval(function(){vyohaRtEnviar({topic:"phoenix",event:"heartbeat",payload:{},ref:String(++VYOHA_RT.ref)});},25000); };
-  ws.onmessage=function(ev){ var m=null; try{m=JSON.parse(ev.data);}catch(e){return;} if(m.event==="phx_reply"&&m.payload&&m.payload.status==="ok"){VYOHA_RT.conectado=true;return;} if(m.event==="postgres_changes"){VYOHA_RT.conectado=true;vyohaRtSincronizar();} if(m.event==="phx_error"||m.event==="phx_close"){VYOHA_RT.conectado=false;vyohaRtAgendar();} };
-  ws.onerror=function(){VYOHA_RT.conectado=false;};
-  ws.onclose=function(){VYOHA_RT.conectado=false;try{if(VYOHA_RT.heartbeat)clearInterval(VYOHA_RT.heartbeat);}catch(e){}VYOHA_RT.heartbeat=null;VYOHA_RT.tentativas=Math.min(4,(VYOHA_RT.tentativas||0)+1);vyohaRtAgendar();};
-}
-function vyohaRtIniciar(){try{if(VYOHA_RT.timer)clearTimeout(VYOHA_RT.timer);}catch(e){}VYOHA_RT.tentativas=0;if(supaAutenticado())vyohaRtConectar();}
-function forcarSincronizacaoConsole(){ f4_sincronizar(function(ok){ consoleEstadoServidor(ok ? "ok" : "erro", ok ? "" : "Falha ao sincronizar."); toast(ok ? "Servidor sincronizado." : "Falha ao sincronizar.", ok ? "ok" : "err"); }); }
-function vyohaRtParar(){vyohaRtFechar();try{if(VYOHA_RT.timer)clearTimeout(VYOHA_RT.timer);}catch(e){}VYOHA_RT.timer=null;}
-
 window.salvarNaRede = function (colecao, registro, depois) {
   return f4_rpc("console_salvar", { colecao: colecao, registro: registro })
     .then(function (r) {
@@ -4927,6 +5032,7 @@ function f5_confirmarProvisionamento(id) {
       F5_ENTREGA[id] = { email: c.email, senha: c.senha_temporaria || null, token: c.token };
       try { gerarFaturas(t); } catch (e) {}
       f5_publicarFaturas(id).then(function () {
+        try { publicarAmbienteConsole(t); } catch (e) {}
         save();
         fecharModal();
         f5_modalEntrega(id);
@@ -5052,8 +5158,27 @@ criarContaNuvemConsole = function (email, senha, tenantId, papel, nome, depois) 
   if (depois) depois(false, "O acesso do cliente e criado pelo servidor.");
 };
 registrarEmpresaNuvem = function (t, depois) { if (depois) depois(true); };
+publicarMapaDaRede = function () {
+  toast("O mapa da rede ja vive no servidor. Nao ha o que publicar.", "ok");
+};
+publicarTudoSozinho = function () {
+  if (!supaConfigurado() || typeof SUPA_TOKEN === "undefined" || !SUPA_TOKEN) return;
+  var liberadas = DB.tenants.filter(function (t) { return t.id !== "vyoha" && t.provisionado; });
+  if (!liberadas.length) return;
+  var agora = retratoDaRede();
+  if (Store.get(K_MAPA_ENVIADO) === agora) return;
+  supaPedido("/rest/v1/ambientes", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(liberadas.map(function (t) {
+      return { tenant_id: t.id, dados: pacoteAmbienteConsole(t) };
+    }))
+  }).then(function (r) {
+    if (r.ok) { try { Store.set(K_MAPA_ENVIADO, agora); } catch (e) {} }
+  }).catch(function () {});
+};
 provisionar = function () {
-  toast("A liberação do ambiente é feita pelo servidor.", "err");
+  toast("A liberacao do ambiente passou a ser feita pelo servidor.", "err");
 };
 
 salvarEmpresa = f5_salvarEmpresa;
@@ -5069,12 +5194,13 @@ window.modalCredenciais = modalCredenciais;
 window.excluirEmpresa = excluirEmpresa;
 window.criarContaNuvemConsole = criarContaNuvemConsole;
 window.registrarEmpresaNuvem = registrarEmpresaNuvem;
+window.publicarMapaDaRede = publicarMapaDaRede;
+window.publicarTudoSozinho = publicarTudoSozinho;
 window.provisionar = provisionar;
 window.f5_copiarEntrega = f5_copiarEntrega;
 window.f5_novaSenha = f5_novaSenha;
 window.f5_modalEntrega = f5_modalEntrega;
 window.sincronizarRede = f5_sincronizar;
-/* Sincronizar = somente consultar novamente o servidor; nunca publicar cache local. */
 
 try { document.body.setAttribute("data-f5", "ativa"); } catch (e) {}
 
