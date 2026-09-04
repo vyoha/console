@@ -1874,147 +1874,222 @@ function salvarObs(id) {
     save(); toast("Observações salvas no servidor.", "ok"); verEmpresa(id, "empresa");
   }).catch(function () { toast("Sem resposta do servidor.", "err"); });
 }
+function contratoStatusLabel(st) {
+  var m = {
+    rascunho:"Rascunho", gerado:"Gerado", enviado:"Enviado para assinatura",
+    assinado_cliente:"Assinado pelo cliente", assinado:"Assinado pelas partes",
+    recusado:"Recusado", cancelado:"Cancelado", expirado:"Expirado", substituido:"Substituído"
+  };
+  return m[st] || "Aguardando assinatura";
+}
+function contratoStatusTag(st) {
+  var cls = st === "assinado" ? "t-ok" : (st === "recusado" || st === "cancelado" ? "t-err" : "t-inf");
+  return '<span class="tag '+cls+'">'+esc(contratoStatusLabel(st))+'</span>';
+}
+function contratoVersoesDo(id) {
+  var c=contratoDe(id);
+  var arr=Array.isArray(DB && DB.contrato_versoes) ? DB.contrato_versoes : [];
+  return c ? srt(arr.filter(function(v){return v.contrato_id===c.id || v.tenant_id===id;}),function(v){return Number(v.versao)||0;},true) : [];
+}
+function contratoAssinaturasDo(id, versaoId, aditivoId) {
+  var arr=Array.isArray(DB && DB.contrato_assinaturas) ? DB.contrato_assinaturas : [];
+  return arr.filter(function(a){
+    return (versaoId && a.contrato_versao_id===versaoId) || (aditivoId && a.contrato_aditivo_id===aditivoId);
+  });
+}
+function contratoAssinatura(id, tipo, versaoId, aditivoId) {
+  var a=contratoAssinaturasDo(id,versaoId,aditivoId);
+  for(var i=0;i<a.length;i++) if(a[i].tipo===tipo) return a[i];
+  return null;
+}
+function contratoAtualizarCache(obj) {
+  if(!obj) return;
+  DB.contratos=Array.isArray(DB.contratos)?DB.contratos:[];
+  if(obj.contrato){
+    var c0=DB.contratos.find(function(x){return x.id===obj.contrato.id;});
+    if(c0) Object.assign(c0,obj.contrato); else DB.contratos.push(obj.contrato);
+  }
+  if(obj.versao){
+    DB.contrato_versoes=Array.isArray(DB.contrato_versoes)?DB.contrato_versoes:[];
+    var v0=DB.contrato_versoes.find(function(x){return x.id===obj.versao.id;});
+    if(v0) Object.assign(v0,obj.versao); else DB.contrato_versoes.push(obj.versao);
+  }
+  if(obj.assinatura){
+    DB.contrato_assinaturas=Array.isArray(DB.contrato_assinaturas)?DB.contrato_assinaturas:[];
+    var a0=DB.contrato_assinaturas.find(function(x){return x.id===obj.assinatura.id;});
+    if(a0) Object.assign(a0,obj.assinatura); else DB.contrato_assinaturas.push(obj.assinatura);
+  }
+  if(obj.aditivo){
+    DB.contrato_aditivos=Array.isArray(DB.contrato_aditivos)?DB.contrato_aditivos:[];
+    var d0=DB.contrato_aditivos.find(function(x){return x.id===obj.aditivo.id;});
+    if(d0) Object.assign(d0,obj.aditivo); else DB.contrato_aditivos.push(obj.aditivo);
+  }
+}
+function contratoSincronizarDetalhe(id) {
+  return rpcConsole("console_contrato",{p_tenant_id:id}).then(function(r){
+    var m=f5_erro(r,"Não foi possível consultar o contrato"); if(m) throw new Error(m);
+    var j=r.corpo||{};
+    if(j.contrato){
+      DB.contratos=Array.isArray(DB.contratos)?DB.contratos:[];
+      DB.contratos=DB.contratos.filter(function(c){return c.tenant_id!==id;}); DB.contratos.push(j.contrato);
+    }
+    DB.contrato_versoes=Array.isArray(j.versoes)?j.versoes:[];
+    DB.contrato_aditivos=Array.isArray(j.aditivos)?j.aditivos:[];
+    DB.contrato_assinaturas=Array.isArray(j.assinaturas)?j.assinaturas:[];
+    return j;
+  });
+}
 function emp_contrato(t) {
-  var c = contratoDe(t.id);
-  var h = box("Contrato vigente", '<div class="box-b">' + (c ?
-    ln("Versão", "v" + c.versao) + ln("Situação", c.status === "assinado" ? "Assinado" : "Aguardando assinatura") +
-    ln("Enviado em", fdate(c.enviado)) + ln("Assinado em", c.assinado ? fdate(c.assinado) : "—") +
-    ln("Arquivo", c.arquivo || "Nenhum arquivo anexado") + ln("Aditivos", String((c.aditivos || []).length)) +
-    '<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:14px">' +
-    (c.status !== "assinado" ? '<button class="btn btn-p" onclick="assinarContrato(\'' + t.id + '\')">Registrar assinatura</button>' : "") +
-    '<label class="btn" style="cursor:pointer">' + ICON.file + "Selecionar contrato assinado<input type=\"file\" accept=\"application/pdf,.pdf\" class=\"hidden\" onchange=\"uploadContratoAssinado('" + t.id + "',this)\"></label>" +
-    (c.storage_path ? '<button class="btn" onclick="abrirContratoArquivo(\'' + t.id + '\')">Abrir arquivo</button>' : "") +
-    '<button class="btn" onclick="imprimirContratoEmpresa(\'' + t.id + '\')">Imprimir contrato</button>' +
-    '<button class="btn" onclick="modalAditivo(\'' + t.id + '\')">Registrar aditivo</button></div>'
-    : vazio("Sem contrato registrado", "Registre o contrato para liberar a implantação.", "", "file")) + "</div>");
-  if (c && (c.aditivos || []).length) {
-    h += '<div style="height:18px"></div>';
-    h += box("Aditivos e renovações", tabela([
-      { h: "Data", r: function (a) { return fdate(a.data); } },
-      { h: "Descrição", r: function (a) { return "<b>" + esc(a.desc) + "</b>"; } },
-      { h: "Registrado por", r: function (a) { return esc(a.por); } }
-    ], srt(c.aditivos, function (a) { return a.data; }, true), vazio("Sem aditivos", "", "", "file")));
+  var c=contratoDe(t.id), vrs=contratoVersoesDo(t.id), v0=contratoVersaoDe(t.id);
+  if(!c){
+    return box("Contrato",vazio("Sem contrato registrado","O contrato será criado a partir da contratação comercial.","","file"));
+  }
+  var v=v0||vrs[0], st=(v&&v.status)||c.status_atual||c.status||"rascunho";
+  var ac=contratoAssinatura(t.id,"cliente",v&&v.id,null), av=contratoAssinatura(t.id,"vyoha",v&&v.id,null);
+  var ads=Array.isArray(DB.contrato_aditivos)?DB.contrato_aditivos.filter(function(a){return a.tenant_id===t.id;}):[];
+  var h=box("Contrato vigente",'<div class="box-b">'+
+    ln("Versão vigente","v"+(c.versao_atual||c.versao||1))+ln("Situação",contratoStatusTag(st))+
+    ln("Enviado em",v&&v.enviado_em?fdate(v.enviado_em):"—")+
+    ln("Assinatura do cliente",ac?fdate(ac.assinado_em):"Pendente")+
+    ln("Assinatura Vyoha",av?fdate(av.assinado_em):"Pendente")+
+    ln("Arquivo assinado",v&&v.arquivo?(esc(v.arquivo)):"Nenhum arquivo anexado")+
+    '<div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:14px">'+
+    ((st==="rascunho"||st==="gerado")?'<button class="btn btn-p" onclick="enviarContrato(\''+t.id+'\')">Enviar para assinatura</button>':"")+ 
+    ((st==="enviado"||st==="assinado_cliente")?'<button class="btn" onclick="modalAssinaturaContrato(\''+t.id+'\',\'cliente\')">Assinar como cliente</button>':"")+ 
+    ((st==="enviado"||st==="assinado_cliente")?'<button class="btn" onclick="modalAssinaturaContrato(\''+t.id+'\',\'vyoha\')">Assinar como Vyoha</button>':"")+ 
+    '<label class="btn" style="cursor:pointer">'+ICON.file+' Anexar PDF assinado<input type="file" accept="application/pdf,.pdf" class="hidden" onchange="uploadContratoAssinado(\''+t.id+'\',this)"></label>'+ 
+    ((v&&v.storage_path)?'<button class="btn" onclick="abrirContratoArquivo(\''+t.id+'\')">Abrir PDF</button>':"")+ 
+    '<button class="btn" onclick="imprimirContratoEmpresa(\''+t.id+'\')">Gerar/Imprimir contrato</button>'+ 
+    '<button class="btn" onclick="modalAditivo(\''+t.id+'\')">Novo aditivo</button></div>'+ 
+    '</div>');
+  if(ac||av){
+    h+='<div style="height:18px"></div>'+box("Evidências de assinatura",tabela([
+      {h:"Parte",r:function(a){return a.tipo==="cliente"?"Cliente":"Vyoha";}},
+      {h:"Nome",r:function(a){return esc(a.nome||"—");}},
+      {h:"Método",r:function(a){return esc(a.metodo||"—");}},
+      {h:"Assinado em",r:function(a){return fdate(a.assinado_em);}},
+      {h:"Evidência",r:function(a){return esc(a.evidencia||"—");}}
+    ],[ac,av].filter(Boolean),""));
+  }
+  if(ads.length){
+    h+='<div style="height:18px"></div>'+box("Aditivos",tabela([
+      {h:"Versão",r:function(a){return "v"+a.versao_origem+" → v"+a.versao_destino;}},
+      {h:"Título",r:function(a){return "<b>"+esc(a.titulo||"—")+"</b>";}},
+      {h:"Status",r:function(a){return contratoStatusTag(a.status);}},
+      {h:"Criado em",r:function(a){return fdate(a.criado_em);}},
+      {h:"Ação",r:function(a){
+        if(a.status==="rascunho"||a.status==="gerado") return '<button class="btn" onclick="enviarAditivo(\''+a.id+'\',\''+t.id+'\')">Enviar</button>';
+        if(a.status==="enviado"||a.status==="assinado_cliente") return '<button class="btn" onclick="modalAssinaturaAditivo(\''+a.id+'\',\''+t.id+'\',\'cliente\')">Assinar</button> <button class="btn" onclick="modalAssinaturaAditivo(\''+a.id+'\',\''+t.id+'\',\'vyoha\')">Vyoha</button>';
+        if(a.status==="assinado") return '<button class="btn btn-p" onclick="aplicarAditivo(\''+a.id+'\',\''+t.id+'\')">Aplicar versão</button>';
+        return "—";
+      }}
+    ],srt(ads,function(a){return Number(a.versao_destino)||0;},true),""));
+  }
+  if(vrs.length){
+    h+='<div style="height:18px"></div>'+box("Histórico de versões",tabela([
+      {h:"Versão",r:function(a){return "v"+a.versao;}},
+      {h:"Tipo",r:function(a){return a.tipo==="aditivo"?"Aditivo":"Original";}},
+      {h:"Status",r:function(a){return contratoStatusTag(a.status);}},
+      {h:"Motivo",r:function(a){return esc(a.motivo||"—");}},
+      {h:"Criada em",r:function(a){return fdate(a.criado_em);}}
+    ],vrs,""));
   }
   return h;
 }
-function uploadContratoAssinado(id, input) {
-  var t = find(DB.tenants, id), c = contratoDe(id), file = input && input.files ? input.files[0] : null;
-  if (!t || !c || !file) return;
-  if (String(file.type || "").toLowerCase() !== "application/pdf" && !/\.pdf$/i.test(file.name)) {
-    input.value = ""; return toast("Envie somente um arquivo PDF.", "err");
-  }
-  if (file.size > 15 * 1024 * 1024) { input.value = ""; return toast("O PDF deve ter no máximo 15 MB.", "err"); }
-  if (!supaAutenticado()) { input.value = ""; return toast("Sua sessão no servidor expirou. Entre novamente.", "err"); }
-  var cfig = supaCfg();
-  var safe = String(file.name || "contrato-assinado.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
-  var path = id + "/" + Date.now() + "-" + safe;
-  toast("Enviando contrato assinado...", "ok");
-  file.arrayBuffer().then(function (buf) {
-    return fetch(cfig.url + "/storage/v1/object/contratos/" + encodeURIComponent(path).replace(/%2F/g, "/"), {
-      method: "POST",
-      headers: { apikey: cfig.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/pdf", "x-upsert": "true" },
-      body: buf
-    });
-  }).then(function (r) {
-    return r.text().then(function (txt) { var j={}; try{j=txt?JSON.parse(txt):{};}catch(e){} if(!r.ok) throw new Error(j.message||j.error||"Falha ao enviar o PDF."); return j; });
-  }).then(function () {
-    var novo = Object.assign({}, c, { arquivo: file.name, storage_path: path, storage_bucket: "contratos", arquivo_assinado: true, arquivo_assinado_em: new Date().toISOString(), status: "assinado", assinado: c.assinado || today(), id: c.id, tenant_id: id });
-    return rpcConsole("console_salvar", { colecao: "contratos", registro: novo }).then(function (r) {
-      var m=f5_erro(r,"O servidor recusou o registro do contrato"); if(m) throw new Error(m);
-      Object.assign(c, novo); auditar("Contrato assinado anexado", t.nome, file.name, id); save();
-      toast("Contrato assinado anexado ao servidor.", "ok"); verEmpresa(id, "contrato");
-    });
-  }).catch(function (e) { toast(e.message || "Não foi possível anexar o contrato.", "err"); });
+function enviarContrato(id){
+  var c=contratoDe(id),v=contratoVersaoDe(id); if(!c||!v)return toast("Versão contratual não encontrada.","err");
+  confirmar("Enviar contrato","Confirma o envio da versão v"+v.versao+" para assinatura?",function(){
+    rpcConsole("console_enviar_contrato",{p_contrato_versao_id:v.id}).then(function(r){
+      var m=f5_erro(r,"O servidor recusou o envio");if(m)return toast(m,"err");
+      contratoAtualizarCache({versao:r.corpo}); if(c) c.status_atual="enviado";
+      auditar("Contrato enviado para assinatura",(find(DB.tenants,id)||{}).nome,"v"+v.versao,id);save();toast("Contrato enviado para assinatura.","ok");verEmpresa(id,"contrato");
+    }).catch(function(e){toast(e.message||"Sem resposta do servidor.","err");});
+  },"Enviar");
 }
-function abrirContratoArquivo(id) {
-  var c=contratoDe(id); if(!c || !c.storage_path) return toast("Nenhum PDF assinado anexado.","err");
-  if(!supaAutenticado()) return toast("Sua sessão no servidor expirou. Entre novamente.","err");
-  var cfg=supaCfg(), path=String(c.storage_path).split("/").map(encodeURIComponent).join("/");
+function modalAssinaturaContrato(id,tipo){
+  var t=find(DB.tenants,id),c=contratoDe(id),v=contratoVersaoDe(id); if(!t||!c||!v)return toast("Versão contratual não encontrada.","err");
+  var atual=contratoAssinatura(id,tipo,v.id,null), dc=c.dados||c.dados_contratuais||{}, ct=dc.contratante||{};
+  var nome=tipo==="cliente"?(ct.representante||t.representante||ct.razao||t.nome):(me()||{}).nome||"Vyoha";
+  var doc=tipo==="cliente"?(ct.cnpj||t.cnpj||""):(me()||{}).cpf||"";
+  var email=tipo==="cliente"?(ct.email||t.email_admin||""):(me()||{}).email||"vyohabr@gmail.com";
+  modal(tipo==="cliente"?"Assinatura do cliente":"Assinatura Vyoha",
+    nota("Registre somente uma assinatura que já tenha sido realizada. O servidor mantém a evidência e controla o status da versão.","inf")+
+    '<div class="fld"><label>Nome <span class="rq">*</span></label><input id="as-nome" value="'+esc((atual&&atual.nome)||nome)+'"></div>'+ 
+    '<div class="rw rw2"><div class="fld"><label>CPF/CNPJ</label><input id="as-doc" value="'+esc((atual&&atual.documento)||doc)+'"></div><div class="fld"><label>E-mail</label><input id="as-email" value="'+esc((atual&&atual.email)||email)+'"></div></div>'+ 
+    '<div class="rw rw2"><div class="fld"><label>Método</label><select id="as-metodo"><option value="gov.br">gov.br</option><option value="outro">Outro meio eletrônico</option></select></div><div class="fld"><label>Data/hora</label><input id="as-data" type="datetime-local" value="'+new Date().toISOString().slice(0,16)+'"></div></div>'+ 
+    '<div class="fld"><label>Identificador/evidência</label><input id="as-evidencia" placeholder="ex.: código/identificador da assinatura" value="'+esc((atual&&atual.evidencia)||"")+'"></div>',
+    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarAssinaturaContrato(\''+id+'\',\''+tipo+'\')">Registrar assinatura</button>');
+}
+function salvarAssinaturaContrato(id,tipo){
+  var vrs=contratoVersaoDe(id);if(!vrs)return toast("Versão contratual não encontrada.","err");
+  var nome=v("as-nome");if(!nome)return toast("Informe o nome do signatário.","err");
+  var dados={nome:nome,documento:v("as-doc"),email:v("as-email"),metodo:v("as-metodo")||"gov.br",assinado_em:new Date(v("as-data")||new Date().toISOString()).toISOString(),evidencia:v("as-evidencia")};
+  rpcConsole("console_assinar_contrato",{p_contrato_versao_id:vrs.id,p_tipo:tipo,p_dados_assinatura:dados}).then(function(r){
+    var m=f5_erro(r,"O servidor recusou a assinatura");if(m)return toast(m,"err");
+    var j=r.corpo||{}; contratoAtualizarCache(j); if(j.contrato) contratoAtualizarCache({contrato:j.contrato});
+    if(j.contrato && j.contrato.status_atual==="assinado") { var t=find(DB.tenants,id); if(t&&(t.situacao==="negociacao"||t.situacao==="contrato_enviado")) {t.situacao="contrato_assinado";rpcConsole("console_atualizar_empresa",{p_tenant:id,p_dados:{situacao:t.situacao}});} }
+    auditar("Assinatura contratual registrada",(find(DB.tenants,id)||{}).nome,tipo+" · v"+vrs.versao,id);save();fecharModal();toast("Assinatura registrada no servidor.","ok");verEmpresa(id,"contrato");
+  }).catch(function(e){toast(e.message||"Sem resposta do servidor.","err");});
+}
+function uploadContratoAssinado(id,input){
+  var t=find(DB.tenants,id),v=contratoVersaoDe(id),file=input&&input.files?input.files[0]:null;if(!t||!v||!file)return;
+  if(String(file.type||"").toLowerCase()!=="application/pdf"&&!/\.pdf$/i.test(file.name)){input.value="";return toast("Envie somente um arquivo PDF.","err");}
+  if(file.size>15*1024*1024){input.value="";return toast("O PDF deve ter no máximo 15 MB.","err");}
+  if(!supaAutenticado()){input.value="";return toast("Sua sessão no servidor expirou. Entre novamente.","err");}
+  var cfg=supaCfg(),path=id+"/contrato-v"+v.versao+"-"+Date.now()+".pdf";
+  toast("Enviando contrato assinado...","ok");
+  file.arrayBuffer().then(function(buf){return fetch(cfg.url+"/storage/v1/object/contratos/"+encodeURIComponent(path).replace(/%2F/g,"/"),{method:"POST",headers:{apikey:cfg.key,Authorization:"Bearer "+SUPA_TOKEN,"Content-Type":"application/pdf","x-upsert":"true"},body:buf});})
+  .then(function(r){return r.text().then(function(txt){var j={};try{j=txt?JSON.parse(txt):{};}catch(e){}if(!r.ok)throw new Error(j.message||j.error||"Falha ao enviar o PDF.");return j;});})
+  .then(function(){return rpcConsole("console_anexar_contrato_assinado",{p_contrato_versao_id:v.id,p_storage_path:path,p_arquivo:file.name});})
+  .then(function(r){var m=f5_erro(r,"O servidor recusou o anexo");if(m)throw new Error(m);contratoAtualizarCache({versao:r.corpo});auditar("PDF contratual anexado",t.nome,file.name,id);save();toast("PDF assinado anexado ao servidor.","ok");verEmpresa(id,"contrato");})
+  .catch(function(e){toast(e.message||"Não foi possível anexar o PDF.","err");});
+}
+function abrirContratoArquivo(id){
+  var v=contratoVersaoDe(id);if(!v||!v.storage_path)return toast("Nenhum PDF assinado anexado.","err");if(!supaAutenticado())return toast("Sua sessão no servidor expirou. Entre novamente.","err");
+  var cfg=supaCfg(),path=String(v.storage_path).split("/").map(encodeURIComponent).join("/");
   fetch(cfg.url+"/storage/v1/object/sign/contratos/"+path,{method:"POST",headers:{apikey:cfg.key,Authorization:"Bearer "+SUPA_TOKEN,"Content-Type":"application/json"},body:JSON.stringify({expiresIn:600})})
-    .then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.message||j.error||"Não foi possível abrir o arquivo.");return j;});})
-    .then(function(j){var u=j.signedURL||j.signedUrl||j.url;if(!u)throw new Error("O servidor não retornou o arquivo.");if(/^\//.test(u))u=cfg.url+"/storage/v1"+u;window.open(u,"_blank");})
-    .catch(function(e){toast(e.message||"Não foi possível abrir o PDF.","err");});
+  .then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.message||j.error||"Não foi possível abrir o arquivo.");return j;});})
+  .then(function(j){var u=j.signedURL||j.signedUrl||j.url;if(!u)throw new Error("O servidor não retornou o arquivo.");if(/^\//.test(u))u=cfg.url+"/storage/v1"+u;window.open(u,"_blank");})
+  .catch(function(e){toast(e.message||"Não foi possível abrir o PDF.","err");});
+}
+function modalAditivo(id){
+  var c=contratoDe(id),t=find(DB.tenants,id),l=(t&&t.licenca)||{};if(!c)return toast("Contrato não encontrado.","err");
+  modal("Novo aditivo contratual",nota("O aditivo preserva a versão vigente. A nova versão só substitui a anterior depois de criada, assinada pelas duas partes e aplicada pelo servidor.","inf")+
+    '<div class="fld"><label>Título <span class="rq">*</span></label><input id="ad-titulo" placeholder="ex.: Ampliação de módulos e alteração de mensalidade"></div>'+ 
+    '<div class="fld"><label>Motivo</label><input id="ad-motivo" placeholder="Motivo comercial/operacional"></div>'+ 
+    '<div class="fld"><label>Descrição</label><textarea id="ad-desc" rows="4" placeholder="Descreva exatamente o que será alterado."></textarea></div>'+ 
+    '<div class="rw rw3"><div class="fld"><label>Implantação</label><input id="ad-impl" value="'+esc(String(l.valor_licenca==null?0:l.valor_licenca))+'"></div><div class="fld"><label>Mensalidade</label><input id="ad-man" value="'+esc(String(l.valor==null?0:l.valor))+'"></div><div class="fld"><label>Vencimento</label><input id="ad-dia" type="number" min="1" max="28" value="'+esc(String(l.dia_venc||10))+'"></div></div>',
+    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarAditivo(\''+id+'\')">Criar aditivo</button>');
+}
+function salvarAditivo(id){
+  var c=contratoDe(id),t=find(DB.tenants,id),titulo=v("ad-titulo"),motivo=v("ad-motivo"),desc=v("ad-desc");if(!c||!t)return toast("Contrato não encontrado.","err");if(!titulo)return toast("Informe o título do aditivo.","err");
+  var dados={implantacao:nv("ad-impl"),mensalidade:nv("ad-man"),vencimento_mensalidade:Math.min(28,Math.max(1,nv("ad-dia")||10))};
+  rpcConsole("console_criar_aditivo",{p_contrato_id:c.id,p_titulo:titulo,p_motivo:motivo,p_descricao:desc,p_dados:dados}).then(function(r){var m=f5_erro(r,"O servidor recusou o aditivo");if(m)throw new Error(m);contratoAtualizarCache({aditivo:r.corpo});auditar("Aditivo contratual criado",t.nome,titulo+" · v"+(r.corpo&&r.corpo.versao_destino),id);save();fecharModal();toast("Aditivo criado como rascunho.","ok");verEmpresa(id,"contrato");}).catch(function(e){toast(e.message||"Não foi possível criar o aditivo.","err");});
+}
+function enviarAditivo(adid,tid){
+  confirmar("Enviar aditivo","Confirma o envio do aditivo para assinatura?",function(){rpcConsole("console_enviar_aditivo",{p_aditivo_id:adid}).then(function(r){var m=f5_erro(r,"O servidor recusou o envio");if(m)return toast(m,"err");contratoAtualizarCache({aditivo:r.corpo});save();toast("Aditivo enviado para assinatura.","ok");verEmpresa(tid,"contrato");}).catch(function(e){toast(e.message||"Sem resposta do servidor.","err");});},"Enviar");
+}
+function modalAssinaturaAditivo(adid,tid,tipo){
+  var a=(DB.contrato_aditivos||[]).find(function(x){return x.id===adid;});if(!a)return toast("Aditivo não encontrado.","err");
+  var atual=contratoAssinatura(tid,tipo,null,adid),t=find(DB.tenants,tid),nome=tipo==="cliente"?((t&&t.representante)||t.nome):((me()||{}).nome||"Vyoha"),doc=tipo==="cliente"?((t&&t.cnpj)||""):((me()||{}).cpf||""),email=tipo==="cliente"?((t&&t.email_admin)||""):((me()||{}).email||"vyohabr@gmail.com");
+  modal(tipo==="cliente"?"Assinatura do aditivo — cliente":"Assinatura do aditivo — Vyoha",nota("A assinatura é registrada no servidor e o aditivo só poderá ser aplicado quando as duas partes estiverem assinadas.","inf")+
+    '<div class="fld"><label>Nome <span class="rq">*</span></label><input id="aa-nome" value="'+esc((atual&&atual.nome)||nome)+'"></div><div class="rw rw2"><div class="fld"><label>CPF/CNPJ</label><input id="aa-doc" value="'+esc((atual&&atual.documento)||doc)+'"></div><div class="fld"><label>E-mail</label><input id="aa-email" value="'+esc((atual&&atual.email)||email)+'"></div></div><div class="rw rw2"><div class="fld"><label>Método</label><select id="aa-metodo"><option value="gov.br">gov.br</option><option value="outro">Outro meio eletrônico</option></select></div><div class="fld"><label>Data/hora</label><input id="aa-data" type="datetime-local" value="'+new Date().toISOString().slice(0,16)+'"></div></div><div class="fld"><label>Identificador/evidência</label><input id="aa-evidencia" value="'+esc((atual&&atual.evidencia)||"")+'"></div>',
+    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarAssinaturaAditivo(\''+adid+'\',\''+tid+'\',\''+tipo+'\')">Registrar assinatura</button>');
+}
+function salvarAssinaturaAditivo(adid,tid,tipo){
+  var nome=v("aa-nome");if(!nome)return toast("Informe o nome do signatário.","err");var dados={nome:nome,documento:v("aa-doc"),email:v("aa-email"),metodo:v("aa-metodo")||"gov.br",assinado_em:new Date(v("aa-data")||new Date().toISOString()).toISOString(),evidencia:v("aa-evidencia")};
+  rpcConsole("console_assinar_aditivo",{p_aditivo_id:adid,p_tipo:tipo,p_dados_assinatura:dados}).then(function(r){var m=f5_erro(r,"O servidor recusou a assinatura");if(m)return toast(m,"err");contratoAtualizarCache({aditivo:r.corpo});var ass=contratoAssinaturasDo(tid,null,adid).find(function(x){return x.tipo===tipo;});if(ass)contratoAtualizarCache({assinatura:ass});save();fecharModal();toast("Assinatura do aditivo registrada.","ok");verEmpresa(tid,"contrato");}).catch(function(e){toast(e.message||"Sem resposta do servidor.","err");});
+}
+function aplicarAditivo(adid,tid){
+  confirmar("Aplicar aditivo","O servidor substituirá a versão vigente pela nova versão assinada. Confirma?",function(){rpcConsole("console_aplicar_aditivo",{p_aditivo_id:adid}).then(function(r){var m=f5_erro(r,"O servidor recusou a aplicação");if(m)return toast(m,"err");var j=r.corpo||{};contratoAtualizarCache(j);if(j.aditivo)contratoAtualizarCache({aditivo:j.aditivo});auditar("Aditivo aplicado",(find(DB.tenants,tid)||{}).nome,"v"+(j.versao&&j.versao.versao),tid);save();toast("Aditivo aplicado. Nova versão contratual vigente.","ok");verEmpresa(tid,"contrato");}).catch(function(e){toast(e.message||"Não foi possível aplicar o aditivo.","err");});},"Aplicar");
 }
 function imprimirContratoEmpresa(id) {
-  var t=find(DB.tenants,id), c=contratoDe(id); if(!t) return toast("Empresa não encontrada.","err");
-  var l=t.licenca||{}, dc=c&&c.dados_contratuais||{}, ct=dc.contratante||{};
-  var recorr=l.fidelizacao_meses?"fidelização de "+l.fidelizacao_meses+" meses":"recorrência mensal sem fidelização";
-  var aviso = Number(l.aviso_previo_dias || 0);
-  var multa = Number(l.multa_rescisao_pct || 0);
-  var cobr={antes_liberacao:"antes da liberação do ambiente",na_assinatura:"na assinatura do contrato",na_ativacao:"na ativação do ambiente",data_especifica:"em data específica"}[l.cobranca_implantacao]||"antes da liberação do ambiente";
-  var ini={ativacao:"na ativação do ambiente","30_dias_ativacao":"30 dias após a ativação",data_especifica:"em data específica"}[l.inicio_mensalidade_regra]||"na ativação do ambiente";
-  var w=window.open("","_blank"); if(!w) return toast("O navegador bloqueou a janela de impressão.","err");
-  var html='<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Contrato - '+esc(t.nome)+'</title><style>body{font:14px Arial,sans-serif;line-height:1.55;color:#111;margin:40px auto;max-width:820px}h1{text-align:center;font-size:22px}h2{font-size:16px;margin-top:24px}.meta{background:#f5f5f5;padding:14px;border-radius:8px}table{width:100%;border-collapse:collapse}td{padding:7px;border-bottom:1px solid #ddd}.sig{display:grid;grid-template-columns:1fr 1fr;gap:60px;margin-top:70px}.line{border-top:1px solid #111;padding-top:8px;text-align:center}@media print{body{margin:20mm auto}.no-print{display:none}}</style></head><body>'+
-    '<div class="no-print" style="text-align:right"><button onclick="print()">Imprimir / salvar PDF</button></div>'+
-    '<h1>CONTRATO DE PRESTAÇÃO DE SERVIÇOS</h1><p style="text-align:center"><b>VYOHA | Gestão empresarial</b></p>'+
-    '<div class="meta"><b>CONTRATADA:</b> Maria Fernanda Pereira de Aguiar, CPF nº 121.750.664-01, titular da marca Vyoha | Gestão empresarial, e-mail vyohabr@gmail.com.</div>'+
-    '<div class="meta" style="margin-top:10px"><b>CONTRATANTE:</b> '+esc(ct.razao||t.razao||t.nome||"")+' — '+esc(ct.cnpj||t.cnpj||"CPF/CNPJ não informado")+'<br><b>Nome fantasia:</b> '+esc(t.nome)+'<br><b>Representante:</b> '+esc(ct.representante||t.representante||"")+'</div>'+
-    '<h2>1. Objeto</h2><p>Prestação de serviços de implantação, disponibilização e manutenção do ambiente contratado da Vyoha, conforme módulos, limites e condições comerciais registrados no cadastro da empresa.</p>'+
-    '<h2>2. Implantação</h2><p>Valor da implantação: <b>'+money(l.valor_licenca||0)+'</b>. A cobrança ocorre '+esc(cobr)+'. O ambiente será liberado conforme as condições comerciais e de pagamento pactuadas.</p>'+
-    '<h2>3. Mensalidade</h2><p>Valor mensal: <b>'+money(l.valor||0)+'</b>. Vencimento: <b>dia '+esc(l.dia_venc||10)+'</b>. O início da mensalidade ocorrerá '+esc(ini)+'.</p>'+
-    '<h2>4. Modelo de contratação</h2><p>'+esc(recorr)+'. O prazo e as condições específicas de renovação, alteração e encerramento serão os registrados na contratação e em seus respectivos aditivos.</p>'+
-    '<h2>5. Cancelamento e rescisão</h2><p>Aviso prévio: <b>'+(aviso?esc(aviso)+' dias':'não definido')+'</b>. Multa por rescisão antecipada: <b>'+(multa?esc(multa)+'%':'não definida')+'</b>. Nenhuma condição não preenchida será presumida.</p>'+
-    '<h2>6. Acesso, segurança e suporte</h2><p>A Vyoha disponibilizará o ambiente e os acessos contratados. Credenciais são pessoais e não devem ser compartilhadas. O suporte e as atualizações seguem o escopo comercial contratado.</p>'+
-    '<h2>7. Alterações e aditivos</h2><p>Alterações de valores, módulos, limites, prazo ou demais condições comerciais serão formalizadas por aditivo ou nova versão contratual, preservando o histórico das versões anteriores.</p>'+
-    '<h2>8. Dados e confidencialidade</h2><p>As partes comprometem-se a utilizar os dados acessados em razão da contratação somente para as finalidades legítimas da prestação dos serviços e a adotar medidas razoáveis de segurança e confidencialidade.</p>'+
-    '<h2>9. Disposições finais</h2><p>Este documento representa o modelo contratual da contratação registrada no Console Vyoha. A assinatura eletrônica será realizada pelas partes conforme o método acordado, podendo o PDF assinado ser armazenado no sistema.</p>'+
-    '<div class="sig"><div class="line">Maria Fernanda Pereira de Aguiar<br>CPF 121.750.664-01<br>CONTRATADA — Vyoha</div><div class="line">'+esc(ct.representante||t.representante||"Representante da contratante")+'<br>'+esc(ct.cnpj||t.cnpj||"CPF/CNPJ")+'<br>CONTRATANTE</div></div>'+
-    '</body></html>';
+  var t=find(DB.tenants,id),c=contratoDe(id),dc=c&&(c.dados||c.dados_contratuais)||{},ct=dc.contratante||{},v=contratoVersaoDe(id);if(!t)return toast("Empresa não encontrada.","err");
+  var l=t.licenca||{},w=window.open("","_blank");if(!w)return toast("O navegador bloqueou a janela de impressão.","err");
+  var html='<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Contrato - '+esc(t.nome)+'</title><style>body{font:14px Arial,sans-serif;line-height:1.55;color:#111;margin:40px auto;max-width:820px}h1{text-align:center;font-size:22px}h2{font-size:16px;margin-top:24px}.meta{background:#f5f5f5;padding:14px;border-radius:8px}.sig{display:grid;grid-template-columns:1fr 1fr;gap:60px;margin-top:70px}.line{border-top:1px solid #111;padding-top:8px;text-align:center}@media print{body{margin:20mm auto}.no-print{display:none}}</style></head><body><div class="no-print" style="text-align:right"><button onclick="print()">Imprimir / salvar PDF</button></div><h1>CONTRATO DE PRESTAÇÃO DE SERVIÇOS</h1><p style="text-align:center"><b>VYOHA | Gestão empresarial</b></p><div class="meta"><b>CONTRATADA:</b> Maria Fernanda Pereira de Aguiar, CPF nº 121.750.664-01, titular da marca Vyoha | Gestão empresarial, e-mail vyohabr@gmail.com.</div><div class="meta" style="margin-top:10px"><b>CONTRATANTE:</b> '+esc(ct.razao||t.razao||t.nome||"")+' — '+esc(ct.cnpj||t.cnpj||"CPF/CNPJ não informado")+'<br><b>Nome fantasia:</b> '+esc(t.nome)+'<br><b>Representante:</b> '+esc(ct.representante||t.representante||"")+'</div><h2>Versão contratual</h2><p>Versão vigente: <b>v'+esc(c.versao_atual||c.versao||1)+'</b>. Status: <b>'+esc(contratoStatusLabel((v&&v.status)||c.status_atual||c.status||"rascunho"))+'</b>.</p><h2>Condições comerciais</h2><p>Implantação: <b>'+money(l.valor_licenca||0)+'</b>. Mensalidade: <b>'+money(l.valor||0)+'</b>. Vencimento: <b>dia '+esc(l.dia_venc||10)+'</b>.</p><h2>Objeto</h2><p>A Vyoha atua na área de gestão empresarial, prestando serviços destinados à organização, estruturação, acompanhamento, análise, automação e aprimoramento de atividades empresariais e profissionais, podendo, como parte de sua prestação, disponibilizar soluções tecnológicas próprias ou de terceiros, integradas, parametrizadas e/ou personalizadas conforme o perfil, diagnóstico e necessidades do CONTRATANTE.</p><h2>Assinatura eletrônica</h2><p>A versão contratual deverá ser considerada assinada quando houver registro das assinaturas das duas partes no fluxo contratual. O PDF assinado poderá ser armazenado no ambiente privado de contratos.</p><div class="sig"><div class="line">Maria Fernanda Pereira de Aguiar<br>CPF 121.750.664-01<br>CONTRATADA — Vyoha</div><div class="line">'+esc(ct.representante||t.representante||"Representante da contratante")+'<br>'+esc(ct.cnpj||t.cnpj||"CPF/CNPJ")+'<br>CONTRATANTE</div></div></body></html>';
   w.document.open();w.document.write(html);w.document.close();
 }
 
-function assinarContrato(id) {
-  var t = find(DB.tenants, id), c = contratoDe(id);
-  if (!t || !c) return toast("Contrato não encontrado.", "err");
-  confirmar("Registrar assinatura", "Confirma que o contrato de " + t.nome + " foi assinado?", function () {
-    var novo = Object.assign({}, c, { status: "assinado", assinado: today() });
-    var dados = Object.assign({}, novo, { id: c.id, tenant_id: id });
-    rpcConsole("console_salvar", { colecao: "contratos", registro: dados }).then(function (r) {
-      var m = f5_erro(r, "O servidor recusou a assinatura");
-      if (m) return toast(m, "err");
-      c.status = novo.status; c.assinado = novo.assinado;
-      if (t.situacao === "negociacao" || t.situacao === "contrato_enviado") t.situacao = "contrato_assinado";
-      rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: { situacao: t.situacao } });
-      auditar("Contrato assinado", t.nome, "v" + c.versao, t.id);
-      save(); toast("Assinatura registrada no servidor.", "ok"); verEmpresa(id, "contrato");
-    }).catch(function () { toast("Sem resposta do servidor.", "err"); });
-  }, "Confirmar");
-}
-function modalAditivo(id) {
-  var c = contratoDe(id), l = (find(DB.tenants, id) || {}).licenca || {};
-  if (!c) return toast("Contrato não encontrado.", "err");
-  modal("Registrar aditivo",
-    nota("O aditivo cria uma <b>nova versão contratual</b>, preserva a anterior e deixa a nova versão aguardando assinatura. Se houver alteração comercial, atualize os campos abaixo.", "inf") +
-    '<div class="fld"><label>Descrição do aditivo <span class="rq">*</span></label><input id="ad-desc" placeholder="ex.: ampliação para 4 PDVs e alteração da mensalidade"></div>' +
-    '<div class="rw rw3"><div class="fld"><label>Implantação</label><input id="ad-impl" value="' + esc(String(l.valor_licenca == null ? 0 : l.valor_licenca)) + '"></div>' +
-    '<div class="fld"><label>Mensalidade</label><input id="ad-man" value="' + esc(String(l.valor == null ? 0 : l.valor)) + '"></div>' +
-    '<div class="fld"><label>Vencimento</label><input id="ad-dia" type="number" min="1" max="28" value="' + esc(String(l.dia_venc || 10)) + '"></div></div>' +
-    '<div class="rw rw2"><div class="fld"><label>Modelo</label><select id="ad-rec"><option value="mensal_sem_fidelizacao">Recorrência mensal sem fidelização</option><option value="fidelizacao">Fidelização por prazo determinado</option></select></div>' +
-    '<div class="fld"><label>Fidelização (meses)</label><input id="ad-fidel" type="number" min="0" max="120" value="' + esc(String(l.fidelizacao_meses || 0)) + '"></div></div>' +
-    '<div class="rw rw2"><div class="fld"><label>Aviso prévio (dias)</label><input id="ad-aviso" type="number" min="0" max="365" value="' + esc(String(l.aviso_previo_dias || 0)) + '"></div>' +
-    '<div class="fld"><label>Multa por rescisão antecipada (%)</label><input id="ad-multa" type="number" min="0" max="100" step="0.01" value="' + esc(String(l.multa_rescisao_pct || 0)) + '"></div></div>' +
-    '<div class="fld"><label>Data</label><input id="ad-data" type="date" value="' + today() + '"></div>',
-    '<button class="btn" onclick="fecharModal()">Cancelar</button><button class="btn btn-p" onclick="salvarAditivo(\'' + id + '\')">Criar nova versão</button>');
-}
-function salvarAditivo(id) {
-  var desc = v("ad-desc"); if (!desc) return toast("Descreva o aditivo.", "err");
-  var t = find(DB.tenants, id), c = contratoDe(id); if (!t || !c) return toast("Contrato não encontrado.", "err");
-  var l = Object.assign({}, t.licenca || {});
-  l.valor_licenca = nv("ad-impl"); l.valor = nv("ad-man"); l.dia_venc = Math.min(28, Math.max(1, nv("ad-dia") || 10));
-  l.recorrencia = v("ad-rec") || "mensal_sem_fidelizacao"; l.fidelizacao_meses = l.recorrencia === "fidelizacao" ? Math.max(1, nv("ad-fidel") || 12) : 0;
-  l.aviso_previo_dias = Math.max(0, Math.min(365, nv("ad-aviso") || 0)); l.multa_rescisao_pct = Math.max(0, Math.min(100, nv("ad-multa") || 0));
-  var ad = { data: v("ad-data") || today(), desc: desc, por: (me() || {}).nome || "Vyoha", de_versao: Number(c.versao || 1), para_versao: Number(c.versao || 1) + 1 };
-  var novosAditivos = (c.aditivos || []).slice(); novosAditivos.push(ad);
-  var dc = Object.assign({}, c.dados_contratuais || {}, { implantacao: l.valor_licenca, mensalidade: l.valor, vencimento_mensalidade: l.dia_venc, recorrencia: l.recorrencia, fidelizacao_meses: l.fidelizacao_meses, aviso_previo_dias: l.aviso_previo_dias, multa_rescisao_pct: l.multa_rescisao_pct, atualizado_em: new Date().toISOString() });
-  var novo = Object.assign({}, c, { id: uid("ct"), versao: Number(c.versao || 1) + 1, status: "aguardando_assinatura", enviado: today(), assinado: null, arquivo: "contrato-" + (t.slug || id) + "-v" + (Number(c.versao || 1) + 1) + ".pdf", aditivos: novosAditivos, dados_contratuais: dc, tenant_id: id });
-  rpcConsole("console_salvar", { colecao: "contratos", registro: novo }).then(function(r){
-    var m=f5_erro(r,"O servidor recusou a nova versão"); if(m) throw new Error(m);
-    t.licenca = l; DB.contratos.push(novo);
-    rpcConsole("console_atualizar_empresa", { p_tenant: id, p_dados: { licenca: l, situacao: "contrato_enviado" } }).then(function(){ });
-    auditar("Aditivo contratual criado", t.nome, desc + " · v" + novo.versao, id, "v" + c.versao, "v" + novo.versao);
-    save(); fecharModal(); toast("Aditivo criado. Nova versão aguardando assinatura.", "ok"); verEmpresa(id,"contrato");
-  }).catch(function(e){ toast(e.message || "Não foi possível criar o aditivo.","err"); });
-}
 function emp_licenca(t) {
   var u = usoLicenca(t), lim = limites(t);
   function linha(nome, o, unid) {
@@ -2583,65 +2658,25 @@ function salvarPlanoEmpresa(id) {
     var dc = (contratoDe(id) || {}).dados_contratuais || {};
     var comercial = Object.assign({}, dc, { implantacao: Number(lic.valor_licenca || 0), mensalidade: Number(lic.valor || 0), vencimento_mensalidade: Number(lic.dia_venc || 10), aviso_previo_dias: Number(lic.aviso_previo_dias || 0), multa_rescisao_pct: Number(lic.multa_rescisao_pct || 0), recorrencia: lic.recorrencia || "mensal_sem_fidelizacao", fidelizacao_meses: Number(lic.fidelizacao_meses || 0) });
     var atual = contratoDe(id);
-    var versao = atual ? Number(atual.versao || 1) + 1 : 1;
-    var novoContrato = atual ? Object.assign({}, atual, { id: uid("ct"), versao: versao, status: "aguardando_assinatura", enviado: today(), assinado: null, dados_contratuais: comercial, aditivos: (atual.aditivos || []).slice() }) : null;
-    var salvarContrato = novoContrato ? rpcConsole("console_salvar", { colecao: "contratos", registro: novoContrato }) : Promise.resolve({ ok: true });
-    salvarContrato.then(function (rr) {
-      var ce = f5_erro(rr, "O servidor recusou a nova versão contratual");
+    if (!atual) return toast("Contrato não encontrado. Crie o contrato antes de alterar valores e limites.", "err");
+    var adDados = Object.assign({}, comercial, { licenca: lic });
+    rpcConsole("console_criar_aditivo", {
+      p_contrato_id: atual.id,
+      p_titulo: "Alteração de valores e limites",
+      p_motivo: "Atualização comercial",
+      p_descricao: antes + " → " + depois,
+      p_dados: adDados
+    }).then(function (r) {
+      var ce = f5_erro(r, "O servidor recusou a criação do aditivo");
       if (ce) throw new Error(ce);
-      if (novoContrato) DB.contratos.push(novoContrato);
-      auditar("Valores e limites alterados", t.nome, "Nova versão contratual v" + versao, t.id, antes, depois);
-      save(); fecharModal(); toast(novoContrato ? "Valores atualizados e nova versão contratual criada." : "Valores e limites atualizados no servidor.", "ok"); verEmpresa(id, novoContrato ? "contrato" : "licenca");
-    }).catch(function(e){ toast(e.message || "Não foi possível atualizar o contrato.", "err"); });
-  }).catch(function () { toast("Sem resposta do servidor.", "err"); });
-}
-function modalExcluirEmpresa(id) {
-  var t = find(DB.tenants, id);
-  var regs = registrosDaEmpresa(id) + DB.users.filter(function (u) { return u.tenant_id === id; }).length;
-  modal("Excluir " + esc(t.nome),
-    nota("Isso remove a empresa e <b>todo o conteúdo dela</b>: usuários, clientes, vendas, parcelas, caixa, títulos, contrato e implantação. " +
-      "Não tem volta. Se a intenção for só bloquear o acesso, use <b>Suspender</b> — a suspensão preserva tudo.", "ng") +
-    ln("Empresa", t.nome) + ln("Registros que serão apagados", String(regs)) +
-    ln("Situação atual", sitNome(t.situacao)) +
-    nota("A exclusão definitiva é uma ação extrema. Ela exige autenticação válida da equipe Vyoha, confirmação do nome exato e execução autorizada no servidor. Não há exclusão automática por engano.", "inf") +
-    '<div class="fld" style="margin-top:12px"><label>Digite o nome da empresa para confirmar</label><input id="ex-nome" placeholder="' + esc(t.nome) + '"></div>',
-    '<button class="btn" onclick="fecharModal()">Cancelar</button>' +
-    '<button class="btn btn-d" onclick="excluirEmpresa(\'' + id + '\')">Excluir definitivamente</button>');
-}
-function excluirEmpresa(id) {
-  if (!consolePodeOperar("excluir a empresa")) return;
-  var t = find(DB.tenants, id);
-  if (v("ex-nome").trim().toLowerCase() !== String(t.nome).trim().toLowerCase())
-    return toast("Digite o nome exato da empresa para confirmar.", "err");
-  var nome = t.nome, regs = registrosDaEmpresa(id);
-  ["customers", "products", "moves", "sales", "parcels", "cash", "metas", "cobrancas", "acordos", "leads",
-    "faturas", "tickets", "growth", "solicitacoes", "implantacoes", "contratos", "config", "users", "sessoes"].forEach(function (c) {
-      DB[c] = (DB[c] || []).filter(function (x) { return x.tenant_id !== id; });
-    });
-  DB.tenants = DB.tenants.filter(function (x) { return x.id !== id; });
-  /* a decisão fica registrada: nada que venha da nuvem recria esta
-     empresa, nem aqui nem no sistema, que divide este mesmo banco */
-  DB.removidos = DB.removidos || [];
-  if (DB.removidos.indexOf(id) < 0) DB.removidos.push(id);
-  /* e o que estiver no servidor sai junto */
-  limparEmpresaNaNuvem(id, nome);
-  auditar("Empresa excluída", nome, regs + " registro(s) removidos", null, "ativa", "excluída");
-  save(); fecharModal(); toast(nome + " foi excluída.", "ok"); ir("empresas");
-}
-/* tira do servidor o que sustentava a empresa: o ambiente (que abriria
-   um computador novo), o acesso das pessoas e o lugar dela no mapa da
-   rede. Se a internet falhar, o que já foi apagado aqui continua
-   apagado — a lista de removidas garante isso. */
-function limparEmpresaNaNuvem(id, nome) {
-  if (!supaConfigurado() || !supaAutenticado()) return;
-  supaPedido("/rest/v1/rpc/apagar_dados_da_empresa", {
-    method: "POST", body: JSON.stringify({ empresa: id })
-  }).then(function (r) {
-    if (!r.ok) return toast("A empresa saiu daqui, mas o servidor recusou a limpeza (" + r.status + "). Ela não volta para esta tela.", "err");
-    auditar("Dados apagados no servidor", nome || id, "ambiente, acessos e operação");
-    save();
-  }).catch(function () {
-    toast("A empresa saiu daqui. Sem resposta do servidor agora — tente a limpeza de novo mais tarde.", "err");
+      t.licenca = lic;
+      DB.contrato_aditivos = Array.isArray(DB.contrato_aditivos) ? DB.contrato_aditivos : [];
+      if (r.corpo) DB.contrato_aditivos.push(r.corpo);
+      auditar("Aditivo comercial criado", t.nome, "Valores e limites: " + antes + " → " + depois, t.id, antes, depois);
+      save(); fecharModal();
+      toast("Aditivo criado no servidor. A nova condição só entra em vigor após as assinaturas.", "ok");
+      verEmpresa(id, "contrato");
+    }).catch(function(e){ toast(e.message || "Não foi possível criar o aditivo.", "err"); });
   });
 }
 /* =======================================================================
