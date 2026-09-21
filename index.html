@@ -6053,5 +6053,141 @@ try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
 <script>
 (function(){"use strict";if(window.__nuvemTrio)return;window.__nuvemTrio=true;var COLS=["faturas","implantacoes"],snap={},fila=[],pronto=false,escoando=false;function autent(){try{return typeof supaAutenticado==="function"&&supaAutenticado()}catch(e){return false}}function base(){return typeof supaPedido==="function"&&typeof DB!=="undefined"&&DB}function avisar(m){try{toast(m,"er")}catch(e){}}function rpc(fn,args){return supaPedido("/rest/v1/rpc/"+fn,{method:"POST",body:JSON.stringify(args)}).then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}},function(){return{ok:r.ok,j:null}})})}var VOLATEIS={versao:1,atualizado_em:1,criado_em:1,criado_por:1,atualizado_por:1};function estavel(x){if(Array.isArray(x))return "["+x.map(estavel).join(",")+"]";if(x&&typeof x==="object"){return "{"+Object.keys(x).filter(function(k){return !VOLATEIS[k]}).sort().map(function(k){return JSON.stringify(k)+":"+estavel(x[k])}).join(",")+"}"}return JSON.stringify(x)}function idMap(a){var m={};(a||[]).forEach(function(x){if(x&&x.id)m[x.id]=estavel(x)});return m}function achatar(row){var d=(row&&row.dados)||{},reg={};Object.keys(d).forEach(function(k){reg[k]=d[k]});reg.id=row.id;reg.tenant_id=row.tenant_id;return reg}function escoar(){if(escoando||!fila.length)return;escoando=true;var job=fila.shift();var p=job.tipo==="salvar"?rpc("console_salvar",{colecao:job.col,registro:job.reg}):rpc("console_apagar",{colecao:job.col,alvo:job.id});p.then(function(res){var erro=!res.ok||(res.j&&res.j.erro);if(erro){fila.push(job);avisar("Servidor recusou gravar ("+((res.j&&res.j.erro)||"erro")+"). Tentando de novo...")}else{snap[job.col]=snap[job.col]||{};if(job.tipo==="salvar")snap[job.col][job.id]=job.txt;else delete snap[job.col][job.id]}},function(){fila.push(job)}).then(function(){escoando=false;if(fila.length)setTimeout(escoar,500)})}function enfileirarDiff(){COLS.forEach(function(col){var atual=idMap(DB[col]||[]),ant=snap[col]||{};Object.keys(atual).forEach(function(id){if(atual[id]!==ant[id]){var reg;try{reg=JSON.parse(atual[id])}catch(e){return}if(!reg.tenant_id)return;fila.push({tipo:"salvar",col:col,id:id,reg:reg,txt:atual[id]})}});Object.keys(ant).forEach(function(id){if(!(id in atual))fila.push({tipo:"apagar",col:col,id:id})})});escoar()}var deb=null;function agendar(){if(deb)clearTimeout(deb);deb=setTimeout(function(){if(pronto)enfileirarDiff()},600)}function iniciar(){carregar()}function carregar(){var faltam=COLS.length;COLS.forEach(function(col){var localAntes=(DB[col]||[]).slice();rpc("console_listar",{colecao:col}).then(function(res){if(res.ok&&Array.isArray(res.j)){var servidor=res.j.map(achatar),idsSrv={};servidor.forEach(function(r){if(r&&r.id)idsSrv[r.id]=1});var soLocal=localAntes.filter(function(r){return r&&r.id&&!idsSrv[r.id]});DB[col]=servidor.concat(soLocal);snap[col]=idMap(DB[col]);soLocal.forEach(function(r){if(r.tenant_id)fila.push({tipo:"salvar",col:col,id:r.id,reg:r,txt:snap[col][r.id]})});escoar()}},function(){}).then(function(){faltam--;if(faltam===0){pronto=true;try{document.documentElement.setAttribute("data-nuvem-trio","ativa")}catch(e){}try{if(typeof ir==="function"&&typeof View!=="undefined")ir(View.pg,View.p)}catch(e){}}})})}if(typeof window.save==="function"){var saveAntigo=window.save;window.save=function(){var r=saveAntigo.apply(this,arguments);try{if(pronto)agendar()}catch(e){}return r}}var espera=setInterval(function(){if(autent()&&base()){clearInterval(espera);iniciar()}},500);setTimeout(function(){try{clearInterval(espera)}catch(e){}},90000)})();
 </script>
+
+
+<!-- CONSOLE · camada CONTRATO gov.br (gerar PDF + assinatura Vyoha validada) -->
+<script>
+/* =====================================================================
+   VYOHA · CONSOLE · camada CONTRATO gov.br
+   Fecha o fluxo de contrato do Console contra as regras de assinatura:
+
+   (1) "Gerar/Imprimir contrato"  -> agora GERA o PDF oficial no servidor
+       (edge gerar-contrato-pdf) e guarda em vyoha/{versao}/original.pdf,
+       marcando documento_original_path. Depois abre a pré-visualização.
+       Sem original guardado, o cliente não tinha o que baixar.
+   (2) "Enviar para assinatura"   -> só libera DEPOIS do PDF gerado.
+   (3) "Assinar como Vyoha" / "Anexar PDF assinado" -> passam a fazer o
+       fluxo VALIDADO: sobem o PDF assinado pela Vyoha em
+       vyoha/{versao}/vyoha-assinado.pdf e chamam a edge
+       validar-contrato-assinado (tipo vyoha). Nada de marcar na mão.
+   (4) "Assinar como cliente" (manual) -> BLOQUEADO: o cliente assina
+       pela área dele no próprio sistema (fluxo gov.br + ITI).
+
+   Camada aditiva: só sobrescreve funções globais já existentes.
+   Depende de: supaCfg, SUPA_TOKEN, supaAutenticado, toast,
+   contratoVersaoDe, contratoDe, contratoSincronizarDetalhe, verEmpresa,
+   find, DB, modal, fecharModal, auditar, save.
+   ===================================================================== */
+(function () {
+  "use strict";
+  if (window.__contratoGovbr) return;
+  window.__contratoGovbr = true;
+
+  function cfg() { return (typeof supaCfg === "function") ? supaCfg() : { url: "", key: "" }; }
+  function autent() { try { return typeof supaAutenticado === "function" && supaAutenticado(); } catch (e) { return false; } }
+  function avisar(m, t) { try { toast(m, t || "err"); } catch (e) {} }
+
+  /* chama uma edge function com o token da sessão do Console */
+  function edge(nome, body) {
+    var c = cfg();
+    return fetch(c.url + "/functions/v1/" + nome, {
+      method: "POST",
+      headers: { apikey: c.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }, function () { return { ok: r.ok, j: null }; }); });
+  }
+
+  /* sobe um arquivo pro bucket contratos (mesmo mecanismo do upload existente) */
+  function subirPDF(path, arrayBuffer) {
+    var c = cfg(), p = String(path).split("/").map(encodeURIComponent).join("/");
+    return fetch(c.url + "/storage/v1/object/contratos/" + p, {
+      method: "POST",
+      headers: { apikey: c.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/pdf", "x-upsert": "true" },
+      body: arrayBuffer
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }, function () { return { ok: r.ok, j: null }; }); });
+  }
+
+  function recarregar(id) {
+    try { if (typeof contratoSincronizarDetalhe === "function") return contratoSincronizarDetalhe(id).then(function () { render(id); }); } catch (e) {}
+    render(id); return Promise.resolve();
+  }
+  function render(id) { try { if (typeof verEmpresa === "function") verEmpresa(id, "contrato"); } catch (e) {} }
+
+  /* ---- (1) GERAR o PDF oficial e depois pré-visualizar --------------- */
+  var imprimirOrig = (typeof imprimirContratoEmpresa === "function") ? imprimirContratoEmpresa : null;
+  window.imprimirContratoEmpresa = function (id) {
+    var v = (typeof contratoVersaoDe === "function") ? contratoVersaoDe(id) : null;
+    var st = v && v.status;
+    // só (re)gera enquanto rascunho/gerado; enviado/assinado não regenera
+    if (v && (st === "rascunho" || st === "gerado")) {
+      if (!autent()) return avisar("Sua sessão no servidor expirou. Entre novamente.");
+      avisar("Gerando o PDF oficial do contrato…", "ok");
+      return edge("gerar-contrato-pdf", { contrato_versao_id: v.id }).then(function (res) {
+        if (!res.ok || (res.j && res.j.error)) return avisar("Não foi possível gerar o contrato: " + ((res.j && (res.j.error || res.j.detalhe)) || "erro"));
+        try { auditar("Contrato (PDF) gerado", (find(DB.tenants, id) || {}).nome, "v" + v.versao, id); save(); } catch (e) {}
+        avisar("Contrato gerado e guardado. Já pode enviar para assinatura.", "ok");
+        recarregar(id);
+        if (imprimirOrig) try { imprimirOrig(id); } catch (e) {}
+      });
+    }
+    // já enviado/assinado: só mostra a pré-visualização
+    if (imprimirOrig) return imprimirOrig(id);
+  };
+
+  /* ---- (2) ENVIAR só depois do original existir ---------------------- */
+  var enviarOrig = (typeof enviarContrato === "function") ? enviarContrato : null;
+  window.enviarContrato = function (id) {
+    var v = (typeof contratoVersaoDe === "function") ? contratoVersaoDe(id) : null;
+    if (v && !v.documento_original_path) return avisar("Gere o PDF do contrato antes de enviar (botão “Gerar/Imprimir contrato”).");
+    if (enviarOrig) return enviarOrig(id);
+  };
+
+  /* ---- (3) assinatura VALIDADA da Vyoha ------------------------------ */
+  function assinarVyoha(id) {
+    var v = (typeof contratoVersaoDe === "function") ? contratoVersaoDe(id) : null;
+    if (!v) return avisar("Versão contratual não encontrada.");
+    if (v.status !== "assinado_cliente") return avisar("A Vyoha só assina depois de o cliente assinar e o sistema validar. Status atual: " + v.status + ".");
+    if (!autent()) return avisar("Sua sessão no servidor expirou. Entre novamente.");
+    var inp = document.createElement("input");
+    inp.type = "file"; inp.accept = "application/pdf,.pdf"; inp.style.display = "none";
+    document.body.appendChild(inp);
+    inp.addEventListener("change", function () {
+      var file = inp.files && inp.files[0]; document.body.removeChild(inp);
+      if (!file) return;
+      if (String(file.type || "").toLowerCase() !== "application/pdf" && !/\.pdf$/i.test(file.name)) return avisar("Envie somente um arquivo PDF.");
+      if (file.size > 20 * 1024 * 1024) return avisar("O PDF deve ter no máximo 20 MB.");
+      var path = "vyoha/" + v.id + "/vyoha-assinado.pdf";
+      avisar("Enviando e validando a assinatura da Vyoha…", "ok");
+      file.arrayBuffer().then(function (buf) {
+        return subirPDF(path, buf).then(function (up) {
+          if (!up.ok) throw new Error((up.j && (up.j.message || up.j.error)) || "Falha ao guardar o PDF.");
+          return edge("validar-contrato-assinado", { contrato_versao_id: v.id, tipo: "vyoha", storage_path: path });
+        });
+      }).then(function (res) {
+        if (!res || !res.ok) {
+          var d = res && res.j; var msg = (d && (d.error || (d.validation && ("laudo: " + d.status)))) || "Assinatura não validada.";
+          return avisar("Não validou: " + msg);
+        }
+        try { auditar("Contrato assinado pela Vyoha (validado ITI)", (find(DB.tenants, id) || {}).nome, "v" + v.versao, id); save(); } catch (e) {}
+        avisar("Assinatura da Vyoha validada. Contrato finalizado.", "ok");
+        recarregar(id);
+      }).catch(function (e) { avisar(e.message || "Sem resposta do servidor."); });
+    });
+    inp.click();
+  }
+
+  /* "Assinar como Vyoha" e "Anexar PDF assinado" -> mesmo fluxo validado.
+     "Assinar como cliente" -> bloqueado (cliente assina no sistema dele). */
+  window.modalAssinaturaContrato = function (id, tipo) {
+    if (tipo === "vyoha") return assinarVyoha(id);
+    return avisar("A assinatura do cliente é feita pelo próprio cliente, na área de contrato do sistema dele (fluxo gov.br). O Console não registra assinatura de cliente manualmente.", "inf");
+  };
+  window.uploadContratoAssinado = function (id /*, input */) {
+    // caminho cru antigo (sem validação) desativado; vira o fluxo validado da Vyoha
+    return assinarVyoha(id);
+  };
+})();
+
+</script>
 </body>
 </html>
