@@ -6087,14 +6087,22 @@ try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
   function autent() { try { return typeof supaAutenticado === "function" && supaAutenticado(); } catch (e) { return false; } }
   function avisar(m, t) { try { toast(m, t || "err"); } catch (e) {} }
 
-  /* chama uma edge function com o token da sessão do Console */
-  function edge(nome, body) {
+  /* chama uma edge function com o token da sessão do Console.
+     Repete 1x em falha de rede (cold start da edge dá "Failed to fetch"
+     no primeiro toque depois de a função ficar parada). */
+  function edge(nome, body, _t) {
     var c = cfg();
     return fetch(c.url + "/functions/v1/" + nome, {
       method: "POST",
       headers: { apikey: c.key, Authorization: "Bearer " + SUPA_TOKEN, "Content-Type": "application/json" },
       body: JSON.stringify(body || {})
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }, function () { return { ok: r.ok, j: null }; }); });
+    }).then(
+      function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }, function () { return { ok: r.ok, j: null }; }); },
+      function () {
+        if (!_t) { return new Promise(function (res) { setTimeout(res, 1500); }).then(function () { return edge(nome, body, 1); }); }
+        return { ok: false, j: { error: "Falha de conexão com o servidor. Tente de novo em instantes." } };
+      }
+    );
   }
 
   /* sobe um arquivo pro bucket contratos (mesmo mecanismo do upload existente) */
