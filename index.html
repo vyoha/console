@@ -6197,5 +6197,133 @@ try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
 })();
 
 </script>
+
+
+<!-- CONSOLE · camada NUVEM-EXTRA (despesas/planos server-only + passo-2) -->
+<script>
+/* =====================================================================
+   VYOHA · CONSOLE · camada NUVEM-EXTRA + PASSO-2
+   (A) Espelha DESPESAS e PLANOS pro servidor (server-only), igual ao
+       trio (faturas/implantacoes): carrega do servidor no boot e grava
+       via console_salvar/console_apagar com fila + re-tentativa.
+       Depende do ajuste na RPC console_salvar (despesas/planos não
+       exigem empresa). Enquanto a RPC não estiver ajustada, a gravação
+       apenas re-tenta e avisa — nada some.
+   (B) PASSO-2 (server-only PURO): o localStorage deixa de guardar as
+       coleções que vivem no servidor. O DB em memória continua completo
+       (o sync usa ele); só o BLOB persistido é limpo dessas coleções,
+       que são recarregadas do servidor no próximo boot.
+
+   Aditiva. Depende de: supaPedido, DB, save, Store, KEY, toast; ir/View
+   opcionais. Não toca banco, RLS, nem as camadas anteriores.
+   ===================================================================== */
+(function () {
+  "use strict";
+
+  /* ---------- (A) sync de despesas + planos ------------------------- */
+  (function nuvemExtra() {
+    if (window.__nuvemExtra) return;
+    window.__nuvemExtra = true;
+
+    var COLS = ["despesas", "planos"];
+    var snap = {}, fila = [], pronto = false, escoando = false;
+
+    function autent() { try { return typeof supaAutenticado === "function" && supaAutenticado(); } catch (e) { return false; } }
+    function base() { return typeof supaPedido === "function" && typeof DB !== "undefined" && DB; }
+    function avisar(m) { try { toast(m, "er"); } catch (e) {} }
+    function rpc(fn, args) {
+      return supaPedido("/rest/v1/rpc/" + fn, { method: "POST", body: JSON.stringify(args) })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }, function () { return { ok: r.ok, j: null }; }); });
+    }
+    var VOLATEIS = { versao: 1, atualizado_em: 1, criado_em: 1, criado_por: 1, atualizado_por: 1 };
+    function estavel(x) {
+      if (Array.isArray(x)) return "[" + x.map(estavel).join(",") + "]";
+      if (x && typeof x === "object") {
+        return "{" + Object.keys(x).filter(function (k) { return !VOLATEIS[k]; }).sort().map(function (k) {
+          return JSON.stringify(k) + ":" + estavel(x[k]);
+        }).join(",") + "}";
+      }
+      return JSON.stringify(x);
+    }
+    function idMap(arr) { var m = {}; (arr || []).forEach(function (x) { if (x && x.id) m[x.id] = estavel(x); }); return m; }
+    function achatar(row) { var d = (row && row.dados) || {}, reg = {}; Object.keys(d).forEach(function (k) { reg[k] = d[k]; }); reg.id = row.id; reg.tenant_id = row.tenant_id; return reg; }
+
+    function escoar() {
+      if (escoando || !fila.length) return;
+      escoando = true;
+      var job = fila.shift();
+      var p = job.tipo === "salvar" ? rpc("console_salvar", { colecao: job.col, registro: job.reg }) : rpc("console_apagar", { colecao: job.col, alvo: job.id });
+      p.then(function (res) {
+        var erro = !res.ok || (res.j && res.j.erro);
+        if (erro) { fila.push(job); avisar("Servidor recusou gravar " + job.col + " (" + ((res.j && res.j.erro) || "erro") + "). Tentando de novo…"); }
+        else { snap[job.col] = snap[job.col] || {}; if (job.tipo === "salvar") snap[job.col][job.id] = job.txt; else delete snap[job.col][job.id]; }
+      }, function () { fila.push(job); }).then(function () { escoando = false; if (fila.length) setTimeout(escoar, 700); });
+    }
+    function enfileirarDiff() {
+      COLS.forEach(function (col) {
+        var atual = idMap(DB[col] || []), ant = snap[col] || {};
+        Object.keys(atual).forEach(function (id) {
+          if (atual[id] !== ant[id]) { var reg; try { reg = JSON.parse(atual[id]); } catch (e) { return; } if (!reg.tenant_id) return; fila.push({ tipo: "salvar", col: col, id: id, reg: reg, txt: atual[id] }); }
+        });
+        Object.keys(ant).forEach(function (id) { if (!(id in atual)) fila.push({ tipo: "apagar", col: col, id: id }); });
+      });
+      escoar();
+    }
+    var deb = null;
+    function agendar() { if (deb) clearTimeout(deb); deb = setTimeout(function () { if (pronto) enfileirarDiff(); }, 700); }
+    function carregar() {
+      var faltam = COLS.length;
+      COLS.forEach(function (col) {
+        var localAntes = (DB[col] || []).slice();
+        rpc("console_listar", { colecao: col }).then(function (res) {
+          if (res.ok && Array.isArray(res.j)) {
+            var servidor = res.j.map(achatar), idsSrv = {};
+            servidor.forEach(function (r) { if (r && r.id) idsSrv[r.id] = 1; });
+            var soLocal = localAntes.filter(function (r) { return r && r.id && !idsSrv[r.id]; });
+            DB[col] = servidor.concat(soLocal);
+            snap[col] = idMap(DB[col]);
+            soLocal.forEach(function (r) { if (r.tenant_id) fila.push({ tipo: "salvar", col: col, id: r.id, reg: r, txt: snap[col][r.id] }); });
+            escoar();
+          }
+        }, function () {}).then(function () {
+          faltam--;
+          if (faltam === 0) {
+            pronto = true;
+            try { document.documentElement.setAttribute("data-nuvem-extra", "ativa"); } catch (e) {}
+            try { if (typeof ir === "function" && typeof View !== "undefined") ir(View.pg, View.p); } catch (e) {}
+          }
+        });
+      });
+    }
+    if (typeof window.save === "function") {
+      var saveAntigo = window.save;
+      window.save = function () { var r = saveAntigo.apply(this, arguments); try { if (pronto) agendar(); } catch (e) {} return r; };
+    }
+    var espera = setInterval(function () { if (autent() && base()) { clearInterval(espera); carregar(); } }, 500);
+    setTimeout(function () { try { clearInterval(espera); } catch (e) {} }, 90000);
+  })();
+
+  /* ---------- (B) PASSO-2: localStorage sem as coleções do servidor -- */
+  (function passo2() {
+    try {
+      if (typeof Store === "undefined" || typeof KEY === "undefined") return;
+      if (Store.__passo2) return; Store.__passo2 = true;
+      var SO = ["faturas", "implantacoes", "contratos", "contrato_versoes", "contrato_assinaturas", "contrato_aditivos", "despesas", "planos"];
+      var setOrig = Store.set;
+      Store.set = function (k, x) {
+        if (k === KEY && typeof x === "string") {
+          try {
+            var d = JSON.parse(x), mudou = false;
+            SO.forEach(function (c) { if (Array.isArray(d[c]) && d[c].length) { d[c] = []; mudou = true; } });
+            if (mudou) x = JSON.stringify(d);
+          } catch (e) {}
+        }
+        return setOrig.call(Store, k, x);
+      };
+    } catch (e) {}
+  })();
+})();
+
+</script>
 </body>
 </html>
