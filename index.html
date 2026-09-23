@@ -6325,5 +6325,24 @@ try { document.body.setAttribute("data-f6", "ativa"); } catch (e) {}
 })();
 
 </script>
+
+<!-- camada LOGIN GOOGLE (Fase A) -->
+<script>
+/* VYOHA CONSOLE - camada LOGIN GOOGLE (Fase A) - aditiva */
+(function(){
+"use strict";
+if(window.__loginGoogle)return;window.__loginGoogle=true;
+var VOLTA="https://console.vyoha.com.br";
+function cfg(){try{return (typeof supaCfg==="function")?supaCfg():null;}catch(e){return null;}}
+function entrarComGoogle(){var c=cfg();if(!c||!c.url)return;location.href=c.url+"/auth/v1/authorize?provider=google&redirect_to="+encodeURIComponent(VOLTA);}
+window.entrarComGoogle=entrarComGoogle;
+function botao(){var b=document.createElement("button");b.type="button";b.id="btn-google";b.setAttribute("onclick","entrarComGoogle()");b.style.cssText="width:100%;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;padding:10px 12px;border:1px solid #dadce0;border-radius:8px;background:#fff;color:#3c4043;font-weight:620;font-size:13.5px;cursor:pointer;font-family:inherit";b.innerHTML='<span>Entrar com </span><span style="font-weight:800;font-size:14.5px"><span style="color:#4285F4">G</span><span style="color:#EA4335">o</span><span style="color:#FBBC05">o</span><span style="color:#4285F4">g</span><span style="color:#34A853">l</span><span style="color:#EA4335">e</span></span>';return b;}
+function injetarBotao(){try{if(document.getElementById("btn-google"))return;var eq=document.getElementById("cs-equipe");if(eq&&eq.parentNode){eq.parentNode.insertBefore(botao(),eq);return;}var form=document.querySelector("#login form");if(form&&form.parentNode){form.parentNode.insertBefore(botao(),form.nextSibling);}}catch(e){}}
+if(typeof window.renderLogin==="function"){var rlOrig=window.renderLogin;window.renderLogin=function(){var r=rlOrig.apply(this,arguments);setTimeout(injetarBotao,0);return r;};}
+function lerHash(){var h=String(location.hash||"");if(h.indexOf("access_token=")<0)return null;var p={};h.replace(/^#/,"").split("&").forEach(function(kv){var i=kv.indexOf("=");if(i<0)return;try{p[decodeURIComponent(kv.slice(0,i))]=decodeURIComponent(kv.slice(i+1));}catch(e){}});return p.access_token?p:null;}
+function consumir(){var p=lerHash();if(!p)return false;try{history.replaceState(null,"",location.pathname+location.search);}catch(e){}try{if(typeof guardarSessaoSupa==="function"){guardarSessaoSupa({access_token:p.access_token,refresh_token:p.refresh_token,expires_in:p.expires_in},"");}}catch(e){}try{location.reload();}catch(e){}return true;}
+if(!consumir()){setTimeout(injetarBotao,0);setTimeout(injetarBotao,500);}
+})();
+</script>
 </body>
 </html>
